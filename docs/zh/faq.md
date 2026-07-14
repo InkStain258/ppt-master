@@ -77,7 +77,9 @@ python3 skills/ppt-master/scripts/update_repo.py
 
 ## Q: 生成的 PPT 可以编辑吗？
 
-可以。主 `.pptx`（原生 PowerPoint 形状，文字、图形、颜色均可直接编辑，无需转换）以时间戳命名保存至 `exports/`。Executor 的原始 SVG 源（`svg_output/` 副本）始终镜像到 `backup/<timestamp>/svg_output/`，便于归档或基于该版重跑 `finalize_svg → svg_to_pptx` 重建 pptx，无需再走 LLM。加 `--svg-snapshot` 会额外在 `exports/` 内并排生成 SVG 快照版 pptx，便于跨平台单文件分发；默认关闭——日常开发/诊断场景中 live preview 已经提供了 SVG 视觉参考。需要 **Office 2016** 或更高版本。
+可以。唯一受支持的 PPTX 产物路线，是由项目转换器读取 `svg_output/` 并生成原生 DrawingML `.pptx`；文字、图形和颜色无需额外转换即可编辑，文件以时间戳命名保存至 `exports/`。Executor 的原始 SVG 源（`svg_output/` 副本）始终镜像到 `backup/<timestamp>/svg_output/`，便于归档或基于该版重跑 `finalize_svg → svg_to_pptx` 重建 PPTX，无需再走 LLM。
+
+Step 7 仍会强制生成 `svg_final/`。其中每页都是自包含的视觉预览 SVG，可直接在浏览器或 IDE 中打开，也可作为 SVG 图片手动插入 PowerPoint；项目只保证其作为预览或图片显示，不保证 PowerPoint 手工“转换为形状”后的结果。需要可编辑形状时，请使用 `exports/` 中由项目转换器生成的原生 PPTX。
 
 ## Q: 为什么一段正文被拆成了好几个文本框？能不能一段一个文本框？
 
@@ -91,7 +93,7 @@ python3 skills/ppt-master/scripts/svg_to_pptx.py <project_path> --no-merge
 
 使用 `--no-merge` 时，SVG 里的每一视觉行都会变成一个独立的 PowerPoint 文本框。这样能**逐像素保留 SVG 的版式**，适合封面、图表、表格、以及任何对版式精度敏感的页面。
 
-**代价**：默认段落合并后，PowerPoint 自动换行的行数可能与原 SVG 不一致。默认更适合正文密集型页面（abstract、多段落章节、参考文献等）；版式敏感页面使用 `--no-merge`。判定足够保守——非段落型 `<text>` 会自动落回按行拆框路径。
+**代价**：默认合并会保留一个可编辑文本框和原始视觉行边界；只有需要让每一视觉行都能单独移动时才使用 `--no-merge`。判定足够保守——非段落型 `<text>` 会自动落回按行拆框路径。
 
 跟 AI 对话时也可以直接说："这个页面要严格保持逐行版式" —— AI 重新导出时会加上 `--no-merge`。
 
@@ -242,7 +244,9 @@ beautify 和主管线的一句话判别：**原来的分页是要保留的信息
 
 **第一步 — 准备参考材料**
 
-**最推荐的方式是直接给原始 `.pptx` 文件**。PPT Master 会提取主题色、字体、全部 Master/Layout、placeholder type/idx 和可复用图片资源，再重建一个干净 Master 与语义 Layout，输出完整且显式分层的 SVG。使用该模板生成新 deck 时，`adaptive` 可在同一 Master 下创建新 Layout，`strict` 保持所选 Layout 契约不变；两者都从 SVG 确定性还原原生结构。
+**最推荐的方式是直接给原始 `.pptx` 文件**。PPT Master 会提取主题色、字体、Master/Layout、placeholder type/idx、原生形状信息和可复用图片资源。`standard` 与 `fidelity` 把来源当作视觉参考，重新设计 SVG roster 和新的 Master/Layout/slot 系统，不保留、也不蒸馏来源拓扑。`mirror` 则按来源页序恢复 Master/Layout 身份与父子关系、placeholder 事实和受支持的视觉对象，不做语义归纳。由于结构层禁止 `<g>`，来源 Master/Layout 的 group wrapper 只允许机械展开成直接原子。
+
+完整导入 SVG 可以保留高级 PowerPoint 形状所需的 metadata、隐藏 carrier 和预览指纹，但模型只读取轻量 inspection projection；projection 永远不是导出源。`standard` / `fidelity` 使用紧凑 canonical metadata。Mirror 从无损来源物化，只在未改的 Slide-local/slot 对象上复用转换器已经支持的 metadata；不支持或已修改的对象保留当前 SVG fallback。
 
 没有源 PPTX 时，截图集也能跑（`cover.png` / `toc.png` / `chapter.png` / `content.png` / `closing.png`），但保真度会明显下降。建议优先找原始 PPTX。
 
@@ -254,12 +258,13 @@ beautify 和主管线的一句话判别：**原来的分页是要保留的信息
 - 期望的风格基调和配色（如"现代克制、深蓝主色调"）
 - 类别偏好（`brand` 品牌 / `general` 通用 / `scenario` 场景 / `government` 政务 / `special` 特殊）
 - 画布格式（默认 16:9，如需其他格式请注明）
+- 输出范围：进入索引的 `library`（默认）或一个已经初始化的 `project`；两者使用相同路由并省略空的可选目录
 
-不需要一次提供所有细节——AI 代理会通过对话追问补齐缺失信息（模板 ID、主题模式等）。
+不需要一次提供所有细节——AI 代理会通过对话追问补齐缺失信息（输出范围、模板 ID、主题模式等）。
 
 **第三步 — 等待完成**
 
-AI 代理会自动完成后续工作 — 分析截图、构建布局定义、注册模板，使其出现在 PPT Master 工作流的模板选项中。
+AI 代理会自动完成后续工作——分析参考、构建布局定义并验证模板。如果你明确需要 PowerPoint 审阅文件，它还会按需生成 `exports/<id>_template_preview.pptx`。两种范围都要求 `templates/`，并使用可选的 `images/`、`icons/` 与 `exports/`：`library` 写入 `skills/ppt-master/templates/<kind>/<id>/` 并完成全局注册；`project` 写入 `projects/<name>/` 并跳过注册；空的可选目录直接省略。把这个工作区根目录交给 Step 3 即可，Step 3 不会复制 `exports/`，全局库的预览导出也由 Git 忽略。旧式平铺包仍可把 `design_spec.md` 放在根目录，目录平铺本身不要求恢复结构。
 
 > **提示**：对风格和使用场景描述得越具体，生成的模板就越符合你的预期。
 

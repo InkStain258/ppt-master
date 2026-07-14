@@ -10,10 +10,12 @@ Usage:
     python3 scripts/svg_quality_checker.py --all examples
 """
 
+import copy
 import sys
 import re
 import json
 import html
+import math
 from pathlib import Path
 from typing import List, Dict, Tuple
 from collections import Counter, defaultdict
@@ -25,11 +27,9 @@ configure_utf8_stdio()
 
 try:
     from project_utils import CANVAS_FORMATS
-    from error_helper import ErrorHelper
 except ImportError:
-    print("Warning: Unable to import dependency modules")
+    print("Warning: Unable to import project_utils")
     CANVAS_FORMATS = {}
-    ErrorHelper = None
 
 try:
     from update_spec import parse_lock as _parse_spec_lock
@@ -40,17 +40,80 @@ try:
     from svg_to_pptx.animation_config import (
         load_animation_config as _load_animation_config,
         validate_animation_config as _validate_animation_config,
+        validate_animation_config_errors as _validate_animation_config_errors,
+        validate_transition_config as _validate_transition_config,
     )
-except ImportError:
+except ImportError as exc:
     _load_animation_config = None
     _validate_animation_config = None
+    _validate_animation_config_errors = None
+    _validate_transition_config = None
+    _animation_config_import_error = str(exc)
+else:
+    _animation_config_import_error = None
 
 try:
     from svg_to_pptx.drawingml.utils import (
+        DRAWINGML_TEXT_FONT_SIZE_MAX as _DRAWINGML_TEXT_FONT_SIZE_MAX,
+        DRAWINGML_TEXT_FONT_SIZE_MIN as _DRAWINGML_TEXT_FONT_SIZE_MIN,
+        IDENTITY_MATRIX as _IDENTITY_MATRIX,
+        font_px_to_hpt as _font_px_to_hpt,
+        matrix_multiply as _matrix_multiply,
+        parse_transform_matrix as _parse_transform_matrix,
         parse_font_family as _parse_export_font_family,
+        parse_inline_style as _parse_inline_style,
+        parse_svg_color as _parse_export_color,
+        parse_svg_length as _parse_export_length,
+        rect_to_dml_xfrm as _rect_to_dml_xfrm,
+        validate_dml_shape_matrix as _validate_dml_shape_matrix,
     )
 except ImportError:
+    _DRAWINGML_TEXT_FONT_SIZE_MAX = None
+    _DRAWINGML_TEXT_FONT_SIZE_MIN = None
+    _IDENTITY_MATRIX = None
+    _font_px_to_hpt = None
+    _matrix_multiply = None
+    _parse_transform_matrix = None
     _parse_export_font_family = None
+    _parse_inline_style = None
+    _parse_export_color = None
+    _parse_export_length = None
+    _rect_to_dml_xfrm = None
+    _validate_dml_shape_matrix = None
+
+try:
+    from svg_to_pptx.drawingml.converter import (
+        collect_unsupported_visuals as _collect_unsupported_visuals,
+    )
+except ImportError:
+    _collect_unsupported_visuals = None
+
+try:
+    from svg_to_pptx.drawingml.elements import (
+        validate_preset_geometry_metadata as _validate_preset_geometry_metadata,
+    )
+except ImportError:
+    _validate_preset_geometry_metadata = None
+
+try:
+    from pptx_to_svg.preset_authoring import (
+        AUTHORING_ATTR as _AUTHORING_ATTR,
+        validate_authored_preset_tree as _validate_authored_preset_tree,
+    )
+except ImportError:
+    _AUTHORING_ATTR = 'data-pptx-authoring'
+    _validate_authored_preset_tree = None
+
+try:
+    from pptx_shapes import (
+        CONNECTOR_PRESET_TYPES as _CONNECTOR_PRESET_TYPES,
+        resolve_preset_preview_hash as _resolve_preset_preview_hash,
+        svg_preset_preview_fingerprint as _svg_preset_preview_fingerprint,
+    )
+except ImportError:
+    _CONNECTOR_PRESET_TYPES = frozenset()
+    _resolve_preset_preview_hash = None
+    _svg_preset_preview_fingerprint = None
 
 try:
     from svg_to_pptx.native_objects import (
@@ -74,36 +137,92 @@ except ImportError:
     _native_object_marker_warnings = None
 
 try:
+    from svg_to_pptx.native_objects.marker_status import (
+        native_marker_release_block_reason as _native_marker_release_block_reason,
+        native_marker_status_errors as _native_marker_status_errors,
+    )
+except ImportError:
+    _native_marker_release_block_reason = None
+    _native_marker_status_errors = None
+
+try:
+    from svg_to_pptx.semantic_markers import (
+        SEMANTIC_ATTRS as _SEMANTIC_ATTRS,
+        validate_semantic_markers as _validate_semantic_markers,
+    )
+except ImportError:
+    _SEMANTIC_ATTRS = frozenset({
+        'data-pptx-page-role',
+        'data-pptx-role',
+    })
+    _validate_semantic_markers = None
+
+try:
+    from svg_to_pptx.geometry_properties import (
+        materialize_inline_geometry_properties as _materialize_inline_geometry_properties,
+        validate_inline_geometry_properties as _validate_inline_geometry_properties,
+    )
+except ImportError:
+    _materialize_inline_geometry_properties = None
+    _validate_inline_geometry_properties = None
+
+try:
+    from svg_to_pptx.use_expander import (
+        UseExpansionError as _UseExpansionError,
+        expand_local_use_references as _expand_local_use_references,
+        validate_local_use_references as _validate_local_use_references,
+    )
+except ImportError:
+    _UseExpansionError = None
+    _expand_local_use_references = None
+    _validate_local_use_references = None
+
+try:
     from svg_to_pptx.pptx_package.template_structure import (
         TemplateStructureError as _TemplateStructureError,
-        PptxLayoutReference as _PptxLayoutReference,
-        PptxStructureLock as _PptxStructureLock,
-        load_native_structure_contract as _load_native_structure_contract,
         load_pptx_structure_lock as _load_pptx_structure_lock,
-        native_structure_lock_errors as _native_structure_lock_errors,
-        parse_preserve_slides as _parse_preserve_structure_slides,
+        parse_template_slide as _parse_template_structure_slide,
         parse_template_slides as _parse_template_structure_slides,
+        _structure_subtree_signature as _structure_subtree_signature,
         template_lock_errors as _template_lock_errors,
+        template_prototype_errors as _template_prototype_errors,
         validate_template_svg as _validate_template_structure_svg,
     )
 except ImportError:
     _TemplateStructureError = None
-    _PptxLayoutReference = None
-    _PptxStructureLock = None
-    _load_native_structure_contract = None
     _load_pptx_structure_lock = None
-    _native_structure_lock_errors = None
-    _parse_preserve_structure_slides = None
+    _parse_template_structure_slide = None
     _parse_template_structure_slides = None
+    _structure_subtree_signature = None
     _template_lock_errors = None
+    _template_prototype_errors = None
     _validate_template_structure_svg = None
+
+try:
+    from svg_to_pptx.drawingml.theme_colors import (
+        ThemeColorError as _ThemeColorError,
+        load_theme_color_spec as _load_theme_color_spec,
+    )
+    from svg_to_pptx.drawingml.theme_fonts import (
+        ThemeFontError as _ThemeFontError,
+        load_master_text_style_spec as _load_master_text_style_spec,
+        load_theme_font_spec as _load_theme_font_spec,
+    )
+except ImportError:
+    _ThemeColorError = None
+    _ThemeFontError = None
+    _load_theme_color_spec = None
+    _load_master_text_style_spec = None
+    _load_theme_font_spec = None
 
 try:
     from svg_finalize.embed_icons import (
         resolve_icon_path as _resolve_icon_path,
+        suggest_icon_name as _suggest_icon_name,
     )
 except ImportError:
     _resolve_icon_path = None
+    _suggest_icon_name = None
 
 try:
     from resource_paths import (
@@ -121,9 +240,401 @@ except ImportError:
     _unresolved_external_image_reference_path = None
 
 
-HEX_VALUE_RE = re.compile(r"#[0-9A-Fa-f]{3,8}")
+HEX_VALUE_RE = re.compile(
+    r"#(?:[0-9A-Fa-f]{3}|[0-9A-Fa-f]{4}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})"
+)
+
+# Master/Layout preflight validation. Structured deck/layout-template projects
+# are checked at authoring time; the exporter remains the final OOXML/package
+# authority. Flat projects only receive the negative guard that rejects authored
+# structure metadata. Template roster/placeholder checks always run. Current
+# bundled templates opt in to complete structure validation through their
+# native_structure_mode: structured declaration. Legacy template-mode packages
+# fail closed and must run the explicit restoration workflow.
+_CHECK_PPTX_STRUCTURED_PROJECT = True
+
+_BARE_HEX_VALUE_RE = re.compile(
+    r"(?:[0-9A-Fa-f]{3}|[0-9A-Fa-f]{4}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})"
+)
+_CANONICAL_SOLID_PAINT_RE = re.compile(r"#[0-9A-F]{6}")
+_CANONICAL_PAINT_PROPERTIES = (
+    'fill',
+    'stroke',
+    'stop-color',
+    'flood-color',
+    'data-pptx-fg',
+    'data-pptx-bg',
+)
+_CANONICAL_PAINT_ALPHA_PROPERTY = {
+    'fill': 'fill-opacity',
+    'stroke': 'stroke-opacity',
+    'stop-color': 'stop-opacity',
+    'flood-color': 'flood-opacity',
+}
 SVG_NS = "http://www.w3.org/2000/svg"
 XLINK_NS = "http://www.w3.org/1999/xlink"
+_NON_VISUAL_SVG_TAGS = frozenset({
+    'defs',
+    'desc',
+    'metadata',
+    'style',
+    'title',
+})
+_PPTX_ROOT_STRUCTURE_ATTRS = (
+    'data-pptx-master',
+    'data-pptx-master-name',
+    'data-pptx-layout',
+    'data-pptx-layout-name',
+)
+_PPTX_STRUCTURE_ATTRS = frozenset({
+    *_PPTX_ROOT_STRUCTURE_ATTRS,
+    'data-pptx-layer',
+    'data-pptx-layout-kind',
+    'data-pptx-placeholder',
+    'data-pptx-placeholder-binding',
+    'data-pptx-placeholder-bounds',
+    'data-pptx-placeholder-carrier',
+    'data-pptx-placeholder-idx',
+})
+_PPTX_PLACEHOLDER_DETAIL_ATTRS = frozenset({
+    'data-pptx-placeholder-binding',
+    'data-pptx-placeholder-bounds',
+    'data-pptx-placeholder-idx',
+})
+_PPTX_STRUCTURE_SECTION_RE = re.compile(
+    r"(?ms)^##[ \t]+pptx_structure[ \t]*\r?\n(.*?)(?=^##[ \t]+|\Z)"
+)
+_PPTX_STRUCTURE_MODE_RE = re.compile(
+    r"(?m)^-[ \t]+mode[ \t]*:[ \t]*([^\s#]+)[ \t]*(?:#.*)?$"
+)
+_SUPPORTED_FILTER_PRIMITIVES = frozenset({
+    'feDropShadow',
+    'feGaussianBlur',
+    'feOffset',
+    'feFlood',
+    'feComposite',
+    'feMerge',
+    'feMergeNode',
+    'feComponentTransfer',
+    'feFuncA',
+})
+_FILTER_EFFECT_PRIMITIVES = frozenset({'feDropShadow', 'feGaussianBlur'})
+_FILTER_PUBLIC_TARGETS = frozenset({'rect', 'circle', 'path', 'text'})
+_CLIP_SHAPE_TAGS = frozenset({'circle', 'ellipse', 'rect', 'path', 'polygon'})
+_DEFINITION_TAGS = frozenset({
+    'clipPath',
+    'filter',
+    'linearGradient',
+    'marker',
+    'pattern',
+    'radialGradient',
+})
+_ALPHA_PROPERTIES = (
+    'opacity',
+    'fill-opacity',
+    'stroke-opacity',
+    'stop-opacity',
+    'flood-opacity',
+)
+_SUPPORTED_INLINE_STYLE_PROPERTIES = frozenset({
+    'cx', 'cy', 'fill', 'fill-opacity', 'filter', 'flood-color',
+    'flood-opacity', 'font-family', 'font-size', 'font-style', 'font-weight',
+    'height', 'letter-spacing', 'opacity', 'r', 'rx', 'ry',
+    'shape-rendering', 'stop-color', 'stop-opacity', 'stroke',
+    'stroke-dasharray', 'stroke-linecap', 'stroke-linejoin', 'stroke-opacity',
+    'stroke-width', 'text-anchor', 'text-decoration', 'vector-effect',
+    'width', 'x', 'y',
+})
+_BAKE_REQUIRED_VISUAL_PROPERTIES = frozenset({
+    'backdrop-filter',
+    'isolation',
+    'mix-blend-mode',
+})
+_NUMBER_TOKEN = r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?'
+_POINT_TOKEN = rf'{_NUMBER_TOKEN}(?:\s*,\s*|\s+){_NUMBER_TOKEN}'
+_MARKER_TRIANGLE_PATH_RE = re.compile(
+    rf'^\s*M\s*{_POINT_TOKEN}(?:\s*L\s*{_POINT_TOKEN}){{2}}\s*Z\s*$',
+    re.IGNORECASE,
+)
+_MARKER_DIAMOND_PATH_RE = re.compile(
+    rf'^\s*M\s*{_POINT_TOKEN}(?:\s*L\s*{_POINT_TOKEN}){{3}}\s*Z\s*$',
+    re.IGNORECASE,
+)
+
+
+def _declared_pptx_structure_mode(project_path: Path) -> str | None:
+    """Return the explicitly locked SVG structure mode without a fallback."""
+    lock_path = project_path / 'spec_lock.md'
+    try:
+        content = lock_path.read_text(encoding='utf-8')
+    except OSError:
+        return None
+    section_match = _PPTX_STRUCTURE_SECTION_RE.search(content)
+    if section_match is None:
+        return None
+    mode_match = _PPTX_STRUCTURE_MODE_RE.search(section_match.group(1))
+    return mode_match.group(1).strip().lower() if mode_match else None
+
+
+def _generated_theme_contract_errors(project_path: Path) -> List[str]:
+    """Validate the current-project theme contract required by release export."""
+    if (
+        _ThemeColorError is None
+        or _ThemeFontError is None
+        or _load_theme_color_spec is None
+        or _load_master_text_style_spec is None
+        or _load_theme_font_spec is None
+    ):
+        return [
+            "PowerPoint theme contract validation is unavailable because the "
+            "theme loader modules could not be imported."
+        ]
+    try:
+        theme_font_spec = _load_theme_font_spec(project_path)
+        _load_master_text_style_spec(project_path)
+        theme_color_spec = _load_theme_color_spec(project_path)
+    except (_ThemeFontError, _ThemeColorError) as exc:
+        return [str(exc)]
+
+    missing: List[str] = []
+    if theme_font_spec is None:
+        missing.append("typography font_family/title_family/body_family")
+    if theme_color_spec is None:
+        missing.append("colors")
+    if not missing:
+        return []
+    return [
+        "spec_lock.md generated PowerPoint theme contract is missing: "
+        + ", ".join(missing)
+    ]
+
+
+def _placeholder_bounds_error(value: str) -> str | None:
+    """Return a concise error for invalid design-zone bounds."""
+    raw_values = [item for item in re.split(r"[\s,]+", value.strip()) if item]
+    if len(raw_values) != 4:
+        return "must contain exactly four numbers: x y width height"
+    try:
+        values = tuple(float(item) for item in raw_values)
+    except ValueError:
+        return "must contain only numeric values"
+    if not all(math.isfinite(item) for item in values):
+        return "must contain only finite values"
+    if values[2] <= 0 or values[3] <= 0:
+        return "must use positive width and height"
+    return None
+
+
+def _local_pptx_structure_errors(
+    root: ET.Element,
+    svg_path: Path,
+    *,
+    require_structure: bool,
+) -> List[str]:
+    """Validate the authoring shape of the structured SVG contract."""
+    errors: List[str] = []
+    root_values = {
+        attr: (root.get(attr) or '').strip()
+        for attr in _PPTX_ROOT_STRUCTURE_ATTRS
+    }
+    has_root_structure = any(root_values.values())
+    if require_structure or has_root_structure:
+        missing = [attr for attr, value in root_values.items() if not value]
+        if missing:
+            errors.append(
+                f"{svg_path.name}: structured SVG root is missing "
+                + ', '.join(missing)
+            )
+
+    parent_by_id = {
+        id(child): parent
+        for parent in root.iter()
+        for child in list(parent)
+    }
+    for elem in root.iter():
+        tag = elem.tag.rsplit('}', 1)[-1]
+        element_id = elem.get('id') or f"<{tag}>"
+        parent = parent_by_id.get(id(elem))
+
+        if elem is not root:
+            nested_root_attrs = [
+                attr for attr in _PPTX_ROOT_STRUCTURE_ATTRS
+                if elem.get(attr) is not None
+            ]
+            if nested_root_attrs:
+                errors.append(
+                    f"{svg_path.name}: {element_id} carries root-only metadata "
+                    + ', '.join(nested_root_attrs)
+                )
+
+        if elem.get('data-pptx-layout-kind') is not None:
+            errors.append(
+                f"{svg_path.name}: data-pptx-layout-kind is a legacy distillation "
+                "attribute; restore the page to the structured contract"
+            )
+
+        layer = (elem.get('data-pptx-layer') or '').strip().lower()
+        placeholder = (elem.get('data-pptx-placeholder') or '').strip().lower()
+        if layer in {'master', 'layout'}:
+            if parent is not root:
+                errors.append(
+                    f"{svg_path.name}: {element_id} data-pptx-layer={layer!r} "
+                    "must be a direct child of the root <svg>"
+                )
+            if tag == 'g':
+                errors.append(
+                    f"{svg_path.name}: {element_id} is a <g> marked as {layer}; "
+                    "Master/Layout fixed visuals must be root-level atomic elements"
+                )
+            if placeholder:
+                errors.append(
+                    f"{svg_path.name}: {element_id} cannot be both a fixed "
+                    f"{layer} element and a placeholder slot"
+                )
+
+        detail_attrs = [
+            attr for attr in _PPTX_PLACEHOLDER_DETAIL_ATTRS
+            if elem.get(attr) is not None
+        ]
+        if detail_attrs and not placeholder:
+            errors.append(
+                f"{svg_path.name}: {element_id} uses placeholder detail metadata "
+                "without data-pptx-placeholder"
+            )
+
+        if placeholder:
+            if parent is not root:
+                errors.append(
+                    f"{svg_path.name}: placeholder slot {element_id} must be a "
+                    "direct child of the root <svg>"
+                )
+            if tag != 'g':
+                errors.append(
+                    f"{svg_path.name}: placeholder slot {element_id} must be a "
+                    "root-level <g>"
+                )
+            if not (elem.get('id') or '').strip():
+                errors.append(
+                    f"{svg_path.name}: every placeholder slot <g> requires a stable id"
+                )
+            wrapper_attrs = sorted(
+                attr.rsplit('}', 1)[-1]
+                for attr in elem.attrib
+                if attr != 'id'
+                and not attr.rsplit('}', 1)[-1].startswith('data-pptx-')
+            )
+            if wrapper_attrs:
+                errors.append(
+                    f"{svg_path.name}: placeholder slot {element_id} is an "
+                    "authoring boundary and may carry only id/data-pptx-*; remove "
+                    + ', '.join(wrapper_attrs)
+                )
+            bounds = (elem.get('data-pptx-placeholder-bounds') or '').strip()
+            if not bounds:
+                errors.append(
+                    f"{svg_path.name}: placeholder slot {element_id} requires "
+                    "data-pptx-placeholder-bounds"
+                )
+            else:
+                bounds_error = _placeholder_bounds_error(bounds)
+                if bounds_error:
+                    errors.append(
+                        f"{svg_path.name}: placeholder slot {element_id} bounds "
+                        + bounds_error
+                    )
+
+            binding = (
+                elem.get('data-pptx-placeholder-binding') or 'carrier'
+            ).strip().lower()
+            if binding not in {'carrier', 'proxy'}:
+                errors.append(
+                    f"{svg_path.name}: placeholder slot {element_id} has unknown "
+                    f"binding {binding!r}; use carrier or proxy"
+                )
+            carrier_descendants = [
+                child for child in elem.iter()
+                if child is not elem
+                and child.get('data-pptx-placeholder-carrier') is not None
+            ]
+            visual_children = [
+                child for child in list(elem)
+                if child.tag.rsplit('}', 1)[-1] not in _NON_VISUAL_SVG_TAGS
+            ]
+            direct_carriers = [
+                child for child in visual_children
+                if (child.get('data-pptx-placeholder-carrier') or '').strip().lower()
+                == 'true'
+            ]
+            nested_carriers = [
+                child for child in carrier_descendants
+                if parent_by_id.get(id(child)) is not elem
+            ]
+            if nested_carriers:
+                names = ', '.join(
+                    child.get('id') or f"<{child.tag.rsplit('}', 1)[-1]}>"
+                    for child in nested_carriers
+                )
+                errors.append(
+                    f"{svg_path.name}: placeholder slot {element_id} has nested "
+                    f"carrier marker(s): {names}; the carrier must be a direct child"
+                )
+            if binding == 'carrier':
+                if len(visual_children) != 1 or len(direct_carriers) != 1:
+                    errors.append(
+                        f"{svg_path.name}: placeholder slot {element_id} requires "
+                        "exactly one visual direct child, marked "
+                        "data-pptx-placeholder-carrier=\"true\""
+                    )
+            if binding == 'proxy':
+                if placeholder != 'object':
+                    errors.append(
+                        f"{svg_path.name}: proxy binding is allowed only for an "
+                        f"object placeholder, not {placeholder!r}"
+                    )
+                if carrier_descendants:
+                    errors.append(
+                        f"{svg_path.name}: proxy placeholder slot {element_id} must "
+                        "not declare a visible placeholder carrier"
+                    )
+                if not visual_children:
+                    errors.append(
+                        f"{svg_path.name}: proxy placeholder slot {element_id} must "
+                        "contain visible Slide-local content"
+                    )
+
+        carrier_value = elem.get('data-pptx-placeholder-carrier')
+        if carrier_value is not None:
+            if carrier_value.strip().lower() != 'true':
+                errors.append(
+                    f"{svg_path.name}: {element_id} "
+                    "data-pptx-placeholder-carrier must equal true"
+                )
+            if parent is None or not (
+                parent.get('data-pptx-placeholder') or ''
+            ).strip():
+                errors.append(
+                    f"{svg_path.name}: placeholder carrier {element_id} must be a "
+                    "direct child of a root placeholder slot"
+                )
+
+        if tag in _NON_VISUAL_SVG_TAGS and (layer or placeholder):
+            errors.append(
+                f"{svg_path.name}: non-visual {element_id} cannot carry "
+                "Master/Layout/placeholder ownership"
+            )
+
+    return list(dict.fromkeys(errors))
+
+
+def _normalize_hex_rgb(value: str) -> str | None:
+    """Normalize 3/4/6/8-digit HEX to alpha-free ``RRGGBB``."""
+    if not HEX_VALUE_RE.fullmatch(value):
+        return None
+    color = value[1:]
+    if len(color) in {3, 4}:
+        color = ''.join(channel * 2 for channel in color)
+    return color[:6].upper()
+
 
 # Fonts that survive direct PPTX typeface assignment on a typical Windows /
 # macOS viewer without requiring a custom install. Keep this aligned with
@@ -149,6 +660,12 @@ PPT_SAFE_FONTS = {
 # values outside every band — i.e. outside this envelope — are drift.
 RAMP_MIN_RATIO = 0.5
 RAMP_MAX_RATIO = 5.0
+
+# Oversampling alone does not imply distortion and is often harmless for small
+# logos. Warn about downscaling only when the source also has material on-disk
+# weight, because PPTX embeds the compressed source asset rather than raw pixels.
+IMAGE_DOWNSIZE_WARN_RATIO = 4.0
+IMAGE_DOWNSIZE_WARN_MIN_BYTES = 1024 * 1024
 
 # Modes / visual styles that legitimately use unbounded hero / poster type
 # (huge cover numerals, act dividers, single-number reveals). For these the
@@ -184,12 +701,160 @@ def _design_spec_is_brand(spec_path: Path) -> bool:
     return False
 
 
+def _declared_template_structure_mode(target_path: Path) -> str | None:
+    """Return a template directory's explicit native structure mode."""
+    directory = target_path.parent if target_path.is_file() else target_path
+    spec_path = directory / 'design_spec.md'
+    try:
+        text = spec_path.read_text(encoding='utf-8')
+    except OSError:
+        return None
+    if not text.startswith('---\n'):
+        return None
+    end = text.find('\n---\n', 4)
+    if end == -1:
+        return None
+    match = re.search(
+        r'^native_structure_mode:\s*([A-Za-z0-9_-]+)\s*$',
+        text[4:end],
+        re.MULTILINE,
+    )
+    return match.group(1).lower() if match else None
+
+
+def _template_structure_checks_enabled(target_path: Path) -> bool:
+    """Return whether positive structure checks apply to this template."""
+    return _declared_template_structure_mode(target_path) == 'structured'
+
+
 def _local_name(elem: ET.Element) -> str:
     """Return an XML element's namespace-free local tag name."""
     tag = elem.tag
     if not isinstance(tag, str):
         return ''
     return tag.rsplit('}', 1)[-1] if '}' in tag else tag
+
+
+def _direct_defs_index(
+    root: ET.Element,
+) -> tuple[Dict[str, ET.Element], set[str]]:
+    """Return direct ``<defs>`` children by id plus duplicate ids."""
+    definitions: Dict[str, ET.Element] = {}
+    duplicates: set[str] = set()
+    for defs_elem in root.iter():
+        if _local_name(defs_elem) != 'defs':
+            continue
+        for child in defs_elem:
+            definition_id = (child.get('id') or '').strip()
+            if not definition_id:
+                continue
+            if definition_id in definitions:
+                duplicates.add(definition_id)
+            definitions[definition_id] = child
+    return definitions, duplicates
+
+
+def _element_label(elem: ET.Element) -> str:
+    """Return a compact element label for validation messages."""
+    tag = _local_name(elem)
+    elem_id = (elem.get('id') or '').strip()
+    return f'<{tag} id="{elem_id}">' if elem_id else f'<{tag}>'
+
+
+def _finite_unit_interval(raw: str) -> float | None:
+    """Parse a finite unitless number in the closed interval ``0..1``."""
+    if re.fullmatch(_NUMBER_TOKEN, raw.strip()) is None:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+        return None
+    return value
+
+
+def _compatible_opacity(
+    raw: str,
+    *,
+    allow_percentage: bool = False,
+) -> float | None:
+    """Parse a finite opacity form supported by the matching converter path.
+
+    Every exported opacity path accepts and clamps unitless numbers. Gradient
+    stops and filter flood alpha additionally accept percentages; ordinary
+    element, fill, stroke, text, picture, and group opacity paths do not.
+    """
+    value_text = raw.strip()
+    is_percent = value_text.endswith('%')
+    if is_percent and not allow_percentage:
+        return None
+    if is_percent:
+        value_text = value_text[:-1].strip()
+    if re.fullmatch(_NUMBER_TOKEN, value_text) is None:
+        return None
+    try:
+        value = float(value_text)
+    except ValueError:
+        return None
+    if not math.isfinite(value):
+        return None
+    if is_percent:
+        value /= 100.0
+    return max(0.0, min(1.0, value))
+
+
+def _normalized_gradient_value(raw: str) -> float | None:
+    """Parse a normalized gradient coordinate or percentage."""
+    value_text = raw.strip()
+    is_percent = value_text.endswith('%')
+    if is_percent:
+        value_text = value_text[:-1].strip()
+    if re.fullmatch(_NUMBER_TOKEN, value_text) is None:
+        return None
+    try:
+        value = float(value_text)
+    except ValueError:
+        return None
+    if not math.isfinite(value):
+        return None
+    value = value / 100.0 if is_percent else value
+    return value if 0.0 <= value <= 1.0 else None
+
+
+def _marker_polygon_vertex_count(raw: str) -> int | None:
+    """Return the number of finite polygon vertices, or ``None``."""
+    tokens = [token for token in re.split(r'[\s,]+', raw.strip()) if token]
+    if not tokens or len(tokens) % 2:
+        return None
+    try:
+        values = [float(token) for token in tokens]
+    except ValueError:
+        return None
+    if not all(math.isfinite(value) for value in values):
+        return None
+    return len(values) // 2
+
+
+def _effective_presentation_value(
+    elem: ET.Element,
+    name: str,
+    parent_by_id: Dict[int, ET.Element],
+) -> str | None:
+    """Resolve one inherited presentation property for validation."""
+    current: ET.Element | None = elem
+    while current is not None:
+        style_values = (
+            _parse_inline_style(current.get('style'))
+            if _parse_inline_style is not None else {}
+        )
+        if name in style_values:
+            return style_values[name]
+        direct = current.get(name)
+        if direct is not None:
+            return direct
+        current = parent_by_id.get(id(current))
+    return None
 
 
 def _parse_viewbox_values(viewbox: str) -> Tuple[float, float, float, float] | None:
@@ -379,11 +1044,32 @@ class SVGQualityChecker:
             # produce misleading errors on a broken document.
             root = self._parse_xml_root(content, result)
             if root is not None:
+                if root.get('transform'):
+                    result['errors'].append(
+                        'Root <svg> transform is unsupported; apply transforms '
+                        'to child elements or groups'
+                    )
+
                 # 1. Check viewBox
                 self._check_viewbox(root, result, expected_format)
 
                 # 2. Check forbidden elements
                 self._check_forbidden_elements(content, root, result)
+
+                # 2b. Validate the closed authoring-property surface and
+                # conditional definition interfaces before export.
+                self._check_authoring_property_contract(root, result)
+                self._check_paint_compatibility(root, result)
+                self._check_reference_spelling(root, result)
+                self._check_definition_contract(root, result)
+                self._check_marker_contract(root, result)
+                self._check_clip_path_contract(root, result)
+
+                # 2c. Validate the supported shadow/glow filter interface.
+                self._check_filter_effects(root, result)
+
+                # 2d. Validate gradient definitions, stops, and coordinates.
+                self._check_gradient_interfaces(root, result)
 
                 # 3. Check font-size values
                 self._check_font_size_values(content, result)
@@ -400,6 +1086,13 @@ class SVGQualityChecker:
                 # 7. Check icon placeholders resolve before post-processing.
                 self._check_icon_placeholders(root, svg_path, result)
 
+                # 7b. Reject visual elements the native converter cannot dispatch.
+                self._check_unsupported_visual_elements(root, result)
+
+                # 7c. Fail closed on invalid PPTX preset/adjustment metadata.
+                self._check_preset_geometry_metadata(root, result)
+                self._check_preset_geometry_transforms(root, result)
+
                 # 8. Check object-level animation anchor quality.
                 self._check_animation_group_ids(root, result)
 
@@ -410,7 +1103,15 @@ class SVGQualityChecker:
                 self._check_native_object_markers(root, result)
 
                 # 8d. Validate explicit master/layout/placeholder metadata.
-                self._check_pptx_structure_metadata(root, svg_path, result)
+                if (
+                    _template_structure_checks_enabled(svg_path)
+                    if self.template_mode
+                    else _CHECK_PPTX_STRUCTURED_PROJECT
+                ):
+                    self._check_pptx_structure_metadata(root, svg_path, result)
+
+                # 8e. Validate rendering-neutral page/structure compiler hints.
+                self._check_semantic_markers(root, svg_path, result)
 
                 # 9. Check spec_lock drift (colors / font-family / font-size).
                 #    Templates do not ship a spec_lock.md, so skip in template
@@ -521,28 +1222,8 @@ class SVGQualityChecker:
         # Forbidden elements blocklist - PPT incompatible
         # ============================================================
 
-        # Clipping / masking
-        # clipPath is allowed on <image> elements and on pptx_to_svg-generated
-        # nested crop <svg data-pptx-crop="1"> wrappers. Both map back to
-        # DrawingML picture geometry in the native converter.
-        if 'clippath' in local_names:
-            ids = {elem.get('id') for elem in elems if elem.get('id')}
-            for elem in elems:
-                clip_ref = elem.get('clip-path')
-                if not clip_ref:
-                    continue
-                tag = _local_name(elem).lower()
-                is_crop_svg = tag == 'svg' and elem.get('data-pptx-crop') == '1'
-                if tag != 'image' and not is_crop_svg:
-                    result['errors'].append(
-                        "clip-path is only allowed on <image> elements or "
-                        "pptx_to_svg crop wrappers — for shapes, draw the target "
-                        "shape directly instead of clipping")
-                match = re.search(r'url\(#([^)]+)\)', clip_ref)
-                if match and match.group(1) not in ids:
-                    result['errors'].append(
-                        f"clip-path references #{match.group(1)} but no matching "
-                        f"<clipPath id=\"{match.group(1)}\"> definition found")
+        # Clipping / masking. The closed image clip-path contract is validated
+        # separately by _check_clip_path_contract.
         if 'mask' in local_names:
             result['errors'].append("Detected forbidden <mask> element (PPT does not support SVG masks)")
 
@@ -564,24 +1245,35 @@ class SVGQualityChecker:
             result['errors'].append("Detected forbidden <link rel=\"stylesheet\"> (external CSS references forbidden)")
         if re.search(r'@import\s+', content_lower):
             result['errors'].append("Detected forbidden @import (external CSS references forbidden)")
+        if _validate_inline_geometry_properties is None:
+            result['warnings'].append(
+                "Unable to import inline geometry validator; "
+                "native export will still validate geometry styles."
+            )
+        else:
+            geometry_errors = _validate_inline_geometry_properties(root)
+            for error in geometry_errors:
+                result['errors'].append(f"Invalid inline geometry property: {error}")
+            if not geometry_errors:
+                _materialize_inline_geometry_properties(root)
 
         # Structure / nesting
         if 'foreignobject' in local_names:
             result['errors'].append(
                 "Detected forbidden <foreignObject> element (use <tspan> for manual line breaks)")
-        has_symbol = 'symbol' in local_names
-        has_use = 'use' in local_names
-        if has_symbol and has_use:
-            result['errors'].append("Detected forbidden <symbol> + <use> complex usage (use basic shapes or simple <use> instead)")
-        # marker-start / marker-end are conditionally allowed (see shared-standards.md §1.1).
-        # The converter maps qualifying <marker> defs to native DrawingML <a:headEnd>/<a:tailEnd>.
-        # We only warn when a marker is used without an obvious <defs> definition in the same file.
-        if re.search(r'\bmarker-(?:start|end)\s*=\s*["\']url\(#([^)]+)\)', content_lower):
-            if 'marker' not in local_names:
-                result['errors'].append(
-                    "Detected marker-start/marker-end referencing a marker id, "
-                    "but no <marker> element found in the file")
-
+        has_generic_use = any(
+            _local_name(elem).lower() == 'use' and elem.get('data-icon') is None
+            for elem in elems
+        )
+        if has_generic_use:
+            if _validate_local_use_references is None:
+                result['warnings'].append(
+                    "Detected local <use> references, but the shared validator "
+                    "could not be imported; native export will still validate them."
+                )
+            else:
+                for error in _validate_local_use_references(root):
+                    result['errors'].append(f"Invalid local <use> reference: {error}")
         # Text / fonts
         if 'textpath' in local_names:
             result['errors'].append("Detected forbidden <textPath> element (path text is incompatible with PPT)")
@@ -601,55 +1293,874 @@ class SVGQualityChecker:
         # Other discouraged elements
         if 'iframe' in local_names:
             result['errors'].append("Detected <iframe> element (should not appear in SVG)")
-        # Paint grammar: rgba()/hsl()/alpha-hex all render in browser preview
-        # but come back as None from parse_hex_color, so the exporter writes
-        # <a:noFill/> — the fill silently disappears in PPTX. Named colors and
-        # rgb() export correctly and are deliberately not flagged.
-        paint_values = [
-            value
-            for attr in ('fill', 'stroke', 'stop-color')
-            for value in self._svg_property_values(content, attr)
+
+        # Paint-server references must match the exact definitions consumed by
+        # drawingml.converter.collect_defs: direct children of <defs> only.
+        defs_by_id = {}
+        for defs_elem in elems:
+            if _local_name(defs_elem).lower() != 'defs':
+                continue
+            for child in defs_elem:
+                child_id = child.get('id')
+                if child_id:
+                    defs_by_id[child_id] = child
+        pattern_descendant_ids = {
+            id(descendant)
+            for pattern in elems
+            if _local_name(pattern).lower() == 'pattern'
+            for descendant in pattern.iter()
+            if descendant is not pattern
+        }
+        fill_shape_tags = {'rect', 'circle', 'ellipse', 'path', 'polygon', 'polyline'}
+        stroke_shape_tags = fill_shape_tags | {'line'}
+        paint_reference_errors = set()
+        for elem in elems:
+            style_values = (
+                _parse_inline_style(elem.get('style'))
+                if _parse_inline_style is not None else {}
+            )
+            for attr in ('fill', 'stroke'):
+                value = style_values.get(attr) or elem.get(attr)
+                match = re.fullmatch(r'url\(#([^)]+)\)', (value or '').strip())
+                if match is None:
+                    continue
+                ref_id = match.group(1)
+                target = defs_by_id.get(ref_id)
+                elem_tag = _local_name(elem)
+                elem_tag_lower = elem_tag.lower()
+                if target is None:
+                    paint_reference_errors.add(
+                        f"<{elem_tag}> {attr}=url(#{ref_id}) has no matching "
+                        "direct <defs> definition"
+                    )
+                    continue
+                has_text_descendant = any(
+                    _local_name(descendant).lower() in {'text', 'tspan'}
+                    for descendant in elem.iter()
+                    if descendant is not elem
+                )
+                if id(elem) in pattern_descendant_ids:
+                    allowed_tags = ()
+                elif attr == 'fill' and elem_tag_lower in fill_shape_tags:
+                    allowed_tags = ('lineargradient', 'radialgradient', 'pattern')
+                elif attr == 'stroke' and elem_tag_lower in stroke_shape_tags:
+                    allowed_tags = ('lineargradient', 'radialgradient')
+                elif attr == 'fill' and elem_tag_lower in {'text', 'tspan'}:
+                    allowed_tags = ('lineargradient', 'radialgradient')
+                elif attr == 'fill' and elem_tag_lower == 'g':
+                    allowed_tags = (
+                        ('lineargradient', 'radialgradient')
+                        if has_text_descendant
+                        else ('lineargradient', 'radialgradient', 'pattern')
+                    )
+                elif attr == 'stroke' and elem_tag_lower == 'g' and not has_text_descendant:
+                    allowed_tags = ('lineargradient', 'radialgradient')
+                else:
+                    allowed_tags = ()
+                target_tag = _local_name(target).lower()
+                if not allowed_tags:
+                    paint_reference_errors.add(
+                        f"<{elem_tag}> {attr}=url(#{ref_id}) is not supported "
+                        "by native PPTX conversion in this context"
+                    )
+                    continue
+                if target_tag not in allowed_tags:
+                    tag_labels = {
+                        'lineargradient': 'linearGradient',
+                        'radialgradient': 'radialGradient',
+                        'pattern': 'pattern',
+                    }
+                    expected = '/'.join(
+                        tag_labels[tag] for tag in allowed_tags
+                    )
+                    paint_reference_errors.add(
+                        f"<{elem_tag}> {attr}=url(#{ref_id}) resolves to "
+                        f"<{_local_name(target)}>; expected {expected}"
+                    )
+        result['errors'].extend(sorted(paint_reference_errors))
+
+    @staticmethod
+    def _canonical_alpha_literal(value: float) -> str:
+        """Return a compact deterministic alpha literal in the closed interval."""
+        bounded = max(0.0, min(1.0, value))
+        return f'{bounded:.6f}'.rstrip('0').rstrip('.') or '0'
+
+    def _check_paint_compatibility(
+        self,
+        root: ET.Element,
+        result: Dict,
+    ) -> None:
+        """Reject unsupported paint and advise one generated-SVG spelling.
+
+        The exporter parser owns compatibility. Any paint it can parse remains
+        valid input; the checker only warns when that spelling differs from the
+        generated-SVG default (uppercase ``#RRGGBB`` plus explicit alpha).
+        """
+        if _parse_export_color is None:
+            result['warnings'].append(
+                "Unable to import svg_to_pptx color parser; skipped paint syntax check"
+            )
+            return
+
+        unsupported: Counter[tuple[str, str]] = Counter()
+        recommendations: Counter[tuple[str, str, str]] = Counter()
+        unsupported_examples: Dict[tuple[str, str], List[str]] = defaultdict(list)
+        recommendation_examples: Dict[tuple[str, str, str], List[str]] = defaultdict(list)
+
+        def remember_example(store: Dict, key: tuple, label: str) -> None:
+            labels = store[key]
+            if label not in labels and len(labels) < 3:
+                labels.append(label)
+
+        for elem in root.iter():
+            label = _element_label(elem)
+            style_declarations: list[tuple[str, str]] = []
+            for fragment in (elem.get('style') or '').split(';'):
+                fragment = fragment.strip()
+                if not fragment or ':' not in fragment:
+                    continue
+                name, value = fragment.split(':', 1)
+                name = name.strip().lower()
+                value = value.strip()
+                if name and value:
+                    style_declarations.append((name, value))
+            style_values = dict(style_declarations)
+
+            paint_entries = [
+                (name, elem.get(name), 'attribute')
+                for name in _CANONICAL_PAINT_PROPERTIES
+                if elem.get(name) is not None
+            ]
+            paint_entries.extend(
+                (name, value, 'inline style')
+                for name, value in style_declarations
+                if name in _CANONICAL_PAINT_PROPERTIES
+            )
+
+            for name, raw_value, source in paint_entries:
+                assert raw_value is not None
+                value = raw_value.strip()
+                source_label = f'{label} {source}'
+
+                if name in {'fill', 'stroke'}:
+                    if value == 'none' or re.fullmatch(r'url\(#[^)]+\)', value):
+                        continue
+                    if value.lower() == 'none':
+                        key = (name, raw_value, f'{name}="none"')
+                        recommendations[key] += 1
+                        remember_example(recommendation_examples, key, source_label)
+                        continue
+                    if value.lower() == 'transparent':
+                        key = (name, raw_value, f'{name}="none"')
+                        recommendations[key] += 1
+                        remember_example(recommendation_examples, key, source_label)
+                        continue
+
+                if _CANONICAL_SOLID_PAINT_RE.fullmatch(value):
+                    continue
+
+                color, color_alpha = _parse_export_color(value)
+                if color is None:
+                    key = (name, raw_value)
+                    unsupported[key] += 1
+                    remember_example(unsupported_examples, key, source_label)
+                    continue
+
+                replacement = f'{name}=\"#{color}\"'
+                alpha_name = _CANONICAL_PAINT_ALPHA_PROPERTY.get(name)
+                if color_alpha < 1.0 and alpha_name is not None:
+                    existing_alpha_raw = (
+                        style_values.get(alpha_name) or elem.get(alpha_name)
+                    )
+                    existing_alpha = (
+                        _compatible_opacity(
+                            existing_alpha_raw,
+                            allow_percentage=alpha_name in {
+                                'stop-opacity',
+                                'flood-opacity',
+                            },
+                        )
+                        if existing_alpha_raw is not None else 1.0
+                    )
+                    effective_alpha = (
+                        color_alpha * existing_alpha
+                        if existing_alpha is not None else color_alpha
+                    )
+                    replacement += (
+                        f' {alpha_name}=\"'
+                        f'{self._canonical_alpha_literal(effective_alpha)}\"'
+                    )
+                elif color_alpha < 1.0:
+                    replacement += (
+                        '; put alpha on the matching pattern child fill/stroke '
+                        'opacity'
+                    )
+                key = (name, raw_value, replacement)
+                recommendations[key] += 1
+                remember_example(recommendation_examples, key, source_label)
+
+        for (name, raw_value), count in sorted(unsupported.items()):
+            allowed = (
+                '#RRGGBB, none, or url(#id)'
+                if name in {'fill', 'stroke'} else '#RRGGBB'
+            )
+            examples = ', '.join(unsupported_examples[(name, raw_value)])
+            result['errors'].append(
+                f"Unsupported SVG paint {name}={raw_value!r} in {count} "
+                f"location(s) ({examples}); use {allowed} or another color "
+                "accepted by svg_to_pptx"
+            )
+
+        for (name, raw_value, replacement), count in sorted(recommendations.items()):
+            examples = ', '.join(
+                recommendation_examples[(name, raw_value, replacement)]
+            )
+            result['warnings'].append(
+                f"Recommendation: {name}={raw_value!r} is converter-compatible "
+                f"in {count} location(s) ({examples}); generated SVG should "
+                f"prefer {replacement}. No change is required for export."
+            )
+
+    def _check_reference_spelling(self, root: ET.Element, result: Dict) -> None:
+        """Recommend SVG 2 ``href`` while retaining legacy XLink input."""
+        labels = []
+        xlink_href = f'{{{XLINK_NS}}}href'
+        for elem in root.iter():
+            if _local_name(elem).lower() not in {'image', 'use'}:
+                continue
+            if elem.get(xlink_href) is not None:
+                labels.append(_element_label(elem))
+        if labels:
+            examples = ', '.join(labels[:3])
+            suffix = f' (+{len(labels) - 3} more)' if len(labels) > 3 else ''
+            result['warnings'].append(
+                f"Recommendation: legacy xlink:href is supported on {len(labels)} "
+                f"reference(s) ({examples}{suffix}); generated SVG should prefer "
+                "href. No change is required for export."
+            )
+
+    def _check_authoring_property_contract(
+        self,
+        root: ET.Element,
+        result: Dict,
+    ) -> None:
+        """Validate inline CSS and alpha values against the authoring surface."""
+        errors: set[str] = set()
+        recommendations: set[str] = set()
+        fidelity_warnings: set[str] = set()
+        for elem in root.iter():
+            label = _element_label(elem)
+            style_declarations: list[tuple[str, str]] = []
+            for fragment in (elem.get('style') or '').split(';'):
+                fragment = fragment.strip()
+                if not fragment:
+                    continue
+                if ':' not in fragment:
+                    errors.add(
+                        f"{label} has malformed inline style declaration {fragment!r}"
+                    )
+                    continue
+                name, value = fragment.split(':', 1)
+                name = name.strip().lower()
+                value = value.strip()
+                if not name or not value:
+                    errors.add(
+                        f"{label} has malformed inline style declaration {fragment!r}"
+                    )
+                    continue
+                style_declarations.append((name, value))
+                if name in _BAKE_REQUIRED_VISUAL_PROPERTIES:
+                    errors.add(
+                        f"{label} uses Bake-required visual property {name!r}; "
+                        "bake the effect or rebuild it with supported geometry"
+                    )
+                elif name not in _SUPPORTED_INLINE_STYLE_PROPERTIES:
+                    errors.add(
+                        f"{label} uses unsupported inline style property {name!r}; "
+                        "native PPTX export would ignore it"
+                    )
+                if '!important' in value.lower():
+                    errors.add(
+                        f"{label} inline style property {name!r} cannot use !important"
+                    )
+
+            for attr_name in elem.attrib:
+                local_attr = attr_name.rsplit('}', 1)[-1]
+                if local_attr in _BAKE_REQUIRED_VISUAL_PROPERTIES:
+                    errors.add(
+                        f"{label} uses Bake-required visual attribute {local_attr!r}; "
+                        "bake the effect or rebuild it with supported geometry"
+                    )
+
+            for name in _ALPHA_PROPERTIES:
+                direct_value = elem.get(name)
+                alpha_entries = []
+                if direct_value is not None:
+                    alpha_entries.append((name, direct_value))
+                alpha_entries.extend(
+                    (f'style {name}', style_value)
+                    for style_name, style_value in style_declarations
+                    if style_name == name
+                )
+                for entry_name, raw_value in alpha_entries:
+                    allow_percentage = name in {'stop-opacity', 'flood-opacity'}
+                    compatible_value = _compatible_opacity(
+                        raw_value,
+                        allow_percentage=allow_percentage,
+                    )
+                    if compatible_value is None:
+                        accepted_form = (
+                            'a finite number or percentage opacity'
+                            if allow_percentage
+                            else 'a finite unitless numeric opacity'
+                        )
+                        errors.add(
+                            f"{label} {entry_name} must be {accepted_form}; "
+                            f"got {raw_value!r}"
+                        )
+                    elif _finite_unit_interval(raw_value) is None:
+                        recommendations.add(
+                            f"Recommendation: {label} {entry_name}={raw_value!r} "
+                            "is converter-compatible; generated SVG should prefer "
+                            f"the unitless 0..1 value "
+                            f"{self._canonical_alpha_literal(compatible_value)!r}. "
+                            "No change is required for export."
+                        )
+
+            if _local_name(elem).lower() != 'g':
+                continue
+            style_opacity = next((
+                value for name, value in reversed(style_declarations)
+                if name == 'opacity'
+            ), None)
+            raw_opacity = style_opacity if style_opacity is not None else elem.get('opacity')
+            if raw_opacity is None:
+                continue
+            opacity = _compatible_opacity(raw_opacity)
+            if opacity is not None and opacity < 1.0:
+                fidelity_warnings.add(
+                    f"Fidelity warning: {label} uses group opacity={raw_opacity!r}. "
+                    "The converter distributes this alpha to descendants and "
+                    "cannot preserve isolated group compositing; generated SVG "
+                    "should prefer descendant alpha. Existing input remains "
+                    "convertible and does not require modification."
+                )
+
+        result['errors'].extend(sorted(errors))
+        result['warnings'].extend(sorted(recommendations))
+        result['warnings'].extend(sorted(fidelity_warnings))
+
+    def _check_definition_contract(
+        self,
+        root: ET.Element,
+        result: Dict,
+    ) -> None:
+        """Require conditional definitions to be direct, uniquely identified defs."""
+        parent_by_id = {
+            id(child): parent
+            for parent in root.iter()
+            for child in list(parent)
+        }
+        definitions, duplicate_definition_ids = _direct_defs_index(root)
+        issues = {
+            f'Duplicate direct <defs> id {definition_id!r} makes local references ambiguous'
+            for definition_id in duplicate_definition_ids
+        }
+        all_id_counts = Counter(
+            elem.get('id')
+            for elem in root.iter()
+            if (elem.get('id') or '').strip()
+        )
+        for definition_id in definitions:
+            if all_id_counts[definition_id] > 1:
+                issues.add(
+                    f'Definition id {definition_id!r} is duplicated in the SVG; '
+                    'local references require one unique target'
+                )
+
+        for elem in root.iter():
+            tag = _local_name(elem)
+            if tag not in _DEFINITION_TAGS:
+                continue
+            label = _element_label(elem)
+            parent = parent_by_id.get(id(elem))
+            if parent is None or _local_name(parent) != 'defs':
+                issues.add(
+                    f"{label} must be a direct child of <defs>"
+                )
+            if not (elem.get('id') or '').strip():
+                issues.add(f"{label} requires a non-empty unique id")
+
+        result['errors'].extend(sorted(issues))
+
+    def _check_marker_contract(
+        self,
+        root: ET.Element,
+        result: Dict,
+    ) -> None:
+        """Validate marker references against the native line-end contract."""
+        definitions, _duplicates = _direct_defs_index(root)
+        parent_by_id = {
+            id(child): parent
+            for parent in root.iter()
+            for child in list(parent)
+        }
+        issues: set[str] = set()
+        checked_markers: set[str] = set()
+
+        for elem in root.iter():
+            for attr in ('marker-start', 'marker-end'):
+                raw_ref = elem.get(attr)
+                if raw_ref is None or raw_ref.strip().lower() == 'none':
+                    continue
+                label = _element_label(elem)
+                tag = _local_name(elem).lower()
+                if tag not in {'line', 'path'}:
+                    issues.add(
+                        f"{label} {attr} is allowed only on <line> or <path>"
+                    )
+                match = re.fullmatch(r'url\(#([^)]+)\)', raw_ref.strip())
+                if match is None:
+                    issues.add(
+                        f"{label} {attr} must be an exact local url(#id) reference; "
+                        f"got {raw_ref!r}"
+                    )
+                    continue
+                marker_id = match.group(1)
+                marker = definitions.get(marker_id)
+                if marker is None or _local_name(marker) != 'marker':
+                    issues.add(
+                        f"{label} {attr}=url(#{marker_id}) has no matching direct "
+                        f"<defs><marker id=\"{marker_id}\"> definition"
+                    )
+                    continue
+
+                visual_children = [
+                    child for child in list(marker)
+                    if _local_name(child) not in _NON_VISUAL_SVG_TAGS
+                ]
+                shape = visual_children[0] if len(visual_children) == 1 else None
+                if marker_id not in checked_markers:
+                    checked_markers.add(marker_id)
+                    marker_label = f'<marker id="{marker_id}">'
+                    if marker.get('orient') != 'auto':
+                        issues.add(f'{marker_label} requires orient="auto"')
+                    marker_units = marker.get('markerUnits', 'strokeWidth')
+                    if marker_units not in {'strokeWidth', 'userSpaceOnUse'}:
+                        issues.add(
+                            f"{marker_label} has unsupported markerUnits={marker_units!r}"
+                        )
+                    for size_attr in ('markerWidth', 'markerHeight'):
+                        raw_size = marker.get(size_attr)
+                        if raw_size is None:
+                            continue
+                        try:
+                            size = float(raw_size)
+                        except ValueError:
+                            size = math.nan
+                        if not math.isfinite(size) or size <= 0:
+                            issues.add(
+                                f"{marker_label} {size_attr} must be a positive "
+                                f"finite number; got {raw_size!r}"
+                            )
+                    if shape is None:
+                        issues.add(
+                            f"{marker_label} must contain exactly one direct "
+                            "triangle/diamond path or polygon, circle, or ellipse"
+                        )
+                    else:
+                        shape_tag = _local_name(shape).lower()
+                        if shape.get('transform'):
+                            issues.add(
+                                f"{marker_label} child <{shape_tag}> cannot use transform"
+                            )
+                        if shape_tag == 'path':
+                            path_data = shape.get('d', '')
+                            if not (
+                                _MARKER_TRIANGLE_PATH_RE.fullmatch(path_data)
+                                or _MARKER_DIAMOND_PATH_RE.fullmatch(path_data)
+                            ):
+                                issues.add(
+                                    f"{marker_label} path must be a closed 3- or "
+                                    "4-vertex path with one explicit M/L command "
+                                    "per vertex"
+                                )
+                        elif shape_tag == 'polygon':
+                            vertex_count = _marker_polygon_vertex_count(
+                                shape.get('points', '')
+                            )
+                            if vertex_count not in {3, 4}:
+                                issues.add(
+                                    f"{marker_label} polygon must contain exactly "
+                                    "3 or 4 finite vertices"
+                                )
+                        elif shape_tag not in {'circle', 'ellipse'}:
+                            issues.add(
+                                f"{marker_label} child <{shape_tag}> has no native "
+                                "line-end mapping"
+                            )
+
+                if shape is None or _parse_export_color is None:
+                    continue
+                stroke_value = _effective_presentation_value(
+                    elem, 'stroke', parent_by_id,
+                )
+                marker_fill = _effective_presentation_value(
+                    shape, 'fill', parent_by_id,
+                ) or '#000000'
+                stroke_color, _stroke_alpha = _parse_export_color(stroke_value or '')
+                fill_color, _fill_alpha = _parse_export_color(marker_fill)
+                if stroke_color is None or fill_color is None:
+                    issues.add(
+                        f"{label} {attr} marker fill and line stroke must both be "
+                        "supported solid colors"
+                    )
+                elif stroke_color != fill_color:
+                    issues.add(
+                        f"{label} {attr}=url(#{marker_id}) marker fill "
+                        f"{marker_fill!r} does not match effective line stroke "
+                        f"{stroke_value!r}"
+                    )
+
+        result['errors'].extend(sorted(issues))
+
+    def _check_clip_path_contract(
+        self,
+        root: ET.Element,
+        result: Dict,
+    ) -> None:
+        """Validate image clip paths against the native picture geometry mapping."""
+        definitions, _duplicates = _direct_defs_index(root)
+        issues: set[str] = set()
+        checked_clips: set[str] = set()
+        for elem in root.iter():
+            raw_ref = elem.get('clip-path')
+            if raw_ref is None or raw_ref.strip().lower() == 'none':
+                continue
+            label = _element_label(elem)
+            tag = _local_name(elem).lower()
+            is_imported_crop = tag == 'svg' and elem.get('data-pptx-crop') == '1'
+            if tag != 'image' and not is_imported_crop:
+                issues.add(
+                    f"{label} clip-path is allowed only on <image> or an imported "
+                    "data-pptx-crop=\"1\" wrapper"
+                )
+            match = re.fullmatch(r'url\(#([^)]+)\)', raw_ref.strip())
+            if match is None:
+                issues.add(
+                    f"{label} clip-path must be an exact local url(#id) "
+                    f"reference; got {raw_ref!r}"
+                )
+                continue
+            clip_id = match.group(1)
+            clip = definitions.get(clip_id)
+            if clip is None or _local_name(clip) != 'clipPath':
+                issues.add(
+                    f"{label} clip-path=url(#{clip_id}) has no matching direct "
+                    f"<defs><clipPath id=\"{clip_id}\"> definition"
+                )
+                continue
+            if clip_id in checked_clips:
+                continue
+            checked_clips.add(clip_id)
+            clip_label = f'<clipPath id="{clip_id}">'
+            clip_units = clip.get('clipPathUnits', 'userSpaceOnUse')
+            if clip_units not in {'userSpaceOnUse', 'objectBoundingBox'}:
+                issues.add(
+                    f"{clip_label} has unsupported clipPathUnits={clip_units!r}"
+                )
+            if clip.get('transform'):
+                issues.add(f"{clip_label} cannot use transform")
+            visual_children = [
+                child for child in list(clip)
+                if _local_name(child) not in _NON_VISUAL_SVG_TAGS
+            ]
+            if len(visual_children) != 1:
+                issues.add(
+                    f"{clip_label} must contain exactly one direct supported shape"
+                )
+                continue
+            shape = visual_children[0]
+            shape_tag = _local_name(shape).lower()
+            if shape_tag not in _CLIP_SHAPE_TAGS:
+                issues.add(
+                    f"{clip_label} child <{shape_tag}> is unsupported; use "
+                    "circle, ellipse, rect, path, or polygon"
+                )
+            if shape.get('transform'):
+                issues.add(
+                    f"{clip_label} child <{shape_tag}> cannot use transform"
+                )
+
+        result['errors'].extend(sorted(issues))
+
+    def _check_filter_effects(self, root: ET.Element, result: Dict) -> None:
+        """Validate filters against the native shadow/glow approximation."""
+        elems = list(root.iter())
+        definitions, _duplicates = _direct_defs_index(root)
+        direct_filters = [
+            elem for elem in definitions.values()
+            if _local_name(elem) == 'filter'
         ]
-        if any('rgba' in value.lower() for value in paint_values):
-            result['errors'].append("Detected forbidden rgba() color (use fill-opacity/stroke-opacity instead)")
-        if any('hsl' in value.lower() for value in paint_values):
-            result['errors'].append(
-                "Detected hsl()/hsla() color (not exported to PPTX — fills become "
-                "invisible; use 6-digit HEX instead)")
-        alpha_hex_re = re.compile(r'^#[0-9A-Fa-f]{4}$|^#[0-9A-Fa-f]{8}$')
-        if any(alpha_hex_re.match(value.strip()) for value in paint_values):
-            result['errors'].append(
-                "Detected alpha-channel HEX color (#RGBA/#RRGGBBAA is not exported "
-                "to PPTX — fills become invisible; use 6-digit HEX plus "
-                "fill-opacity/stroke-opacity)")
-        if any(_local_name(elem).lower() == 'g' and elem.get('opacity') for elem in elems):
-            result['errors'].append("Detected forbidden <g opacity> (set opacity on each child element individually)")
-        if any(_local_name(elem).lower() == 'image' and elem.get('opacity') for elem in elems):
-            result['errors'].append("Detected forbidden <image opacity> (use overlay mask approach)")
+        filters_by_id = {
+            filter_id: elem
+            for filter_id, elem in definitions.items()
+            if _local_name(elem) == 'filter'
+        }
+
+        issues = set()
+        for elem in elems:
+            tag = _local_name(elem).lower()
+            label = _element_label(elem)
+            style_values = (
+                _parse_inline_style(elem.get('style'))
+                if _parse_inline_style is not None else {}
+            )
+            if style_values.get('filter'):
+                issues.add(
+                    f"{label} filter must use a direct filter=\"url(#id)\" "
+                    "attribute; inline style filters are not supported"
+                )
+
+            raw_filter = elem.get('filter')
+            if raw_filter is None:
+                continue
+            if tag not in _FILTER_PUBLIC_TARGETS:
+                issues.add(
+                    f"{label} cannot use filter; supported native targets are "
+                    "rect, circle, path, and text"
+                )
+            match = re.fullmatch(r'url\(#([^)]+)\)', raw_filter.strip())
+            if match is None:
+                issues.add(
+                    f"{label} filter must be an exact local url(#id) reference; "
+                    f"got {raw_filter!r}"
+                )
+                continue
+            filter_id = match.group(1)
+            if filter_id not in filters_by_id:
+                issues.add(
+                    f"{label} filter=url(#{filter_id}) has no matching direct "
+                    f"<defs><filter id=\"{filter_id}\"> definition"
+                )
+
+        for filter_elem in direct_filters:
+            filter_id = filter_elem.get('id')
+            label = f"filter #{filter_id}" if filter_id else '<filter> without id'
+            primitives = [
+                _local_name(descendant)
+                for descendant in filter_elem.iter()
+                if descendant is not filter_elem
+            ]
+            unsupported = sorted(
+                set(primitives) - _SUPPORTED_FILTER_PRIMITIVES
+            )
+            if unsupported:
+                issues.add(
+                    f"{label} uses unsupported filter primitive(s): "
+                    f"{', '.join(unsupported)}"
+                )
+            effect_primitives = [
+                primitive for primitive in primitives
+                if primitive in _FILTER_EFFECT_PRIMITIVES
+            ]
+            if not effect_primitives:
+                issues.add(
+                    f"{label} must contain feDropShadow or feGaussianBlur"
+                )
+            elif len(effect_primitives) > 1:
+                issues.add(
+                    f"{label} contains multiple shadow/glow primitives; one "
+                    "filter must map to exactly one native effect"
+                )
+            if any(
+                _local_name(descendant) == 'feFuncA'
+                and descendant.get('type') != 'linear'
+                for descendant in filter_elem.iter()
+            ):
+                issues.add(f"{label} requires feFuncA type=\"linear\"")
+
+            for primitive in filter_elem.iter():
+                primitive_tag = _local_name(primitive)
+                numeric_attrs: tuple[tuple[str, bool], ...] = ()
+                if primitive_tag in {'feDropShadow', 'feGaussianBlur'}:
+                    numeric_attrs = (('stdDeviation', True),)
+                elif primitive_tag == 'feOffset':
+                    numeric_attrs = (('dx', False), ('dy', False))
+                elif primitive_tag == 'feFuncA':
+                    numeric_attrs = (('slope', True),)
+                if primitive_tag == 'feDropShadow':
+                    numeric_attrs += (('dx', False), ('dy', False))
+                for attr_name, non_negative in numeric_attrs:
+                    raw_value = primitive.get(attr_name)
+                    if raw_value is None:
+                        continue
+                    try:
+                        value = float(raw_value)
+                    except ValueError:
+                        value = math.nan
+                    if (
+                        not math.isfinite(value)
+                        or (non_negative and value < 0)
+                        or (
+                            primitive_tag == 'feFuncA'
+                            and attr_name == 'slope'
+                            and value > 1
+                        )
+                    ):
+                        qualifier = ' from 0 to 1' if primitive_tag == 'feFuncA' else ''
+                        issues.add(
+                            f"{label} <{primitive_tag}> {attr_name} must be a "
+                            f"finite number{qualifier}; got {raw_value!r}"
+                        )
+
+        result['errors'].extend(sorted(issues))
+
+    def _check_gradient_interfaces(self, root: ET.Element, result: Dict) -> None:
+        """Validate the normalized native gradient authoring interface."""
+        issues = set()
+        for gradient in root.iter():
+            tag = _local_name(gradient)
+            if tag not in {'linearGradient', 'radialGradient'}:
+                continue
+            gradient_id = gradient.get('id')
+            label = f"<{tag} id=\"{gradient_id}\">" if gradient_id else f'<{tag}>'
+            attribute_names = {
+                name.rsplit('}', 1)[-1]
+                for name in gradient.attrib
+            }
+            if 'href' in attribute_names:
+                issues.add(
+                    f"{label} cannot inherit from href/xlink:href; "
+                    "define gradient stops directly"
+                )
+            if 'gradientTransform' in attribute_names:
+                issues.add(f"{label} cannot use gradientTransform")
+            if 'spreadMethod' in attribute_names:
+                issues.add(f"{label} cannot use spreadMethod")
+            gradient_units = gradient.get('gradientUnits')
+            if gradient_units not in {None, 'objectBoundingBox'}:
+                issues.add(
+                    f"{label} cannot use gradientUnits={gradient_units!r}; "
+                    "use normalized objectBoundingBox coordinates"
+                )
+
+            coordinate_names = (
+                ('x1', 'y1', 'x2', 'y2')
+                if tag == 'linearGradient'
+                else ('cx', 'cy', 'r', 'fx', 'fy')
+            )
+            for coordinate_name in coordinate_names:
+                raw_coordinate = gradient.get(coordinate_name)
+                if raw_coordinate is None:
+                    continue
+                coordinate = _normalized_gradient_value(raw_coordinate)
+                if coordinate is None:
+                    issues.add(
+                        f"{label} {coordinate_name} must be a normalized finite "
+                        f"value from 0 to 1 or 0% to 100%; got {raw_coordinate!r}"
+                    )
+                elif coordinate_name == 'r' and coordinate <= 0:
+                    issues.add(f"{label} r must be greater than 0")
+
+            stops = []
+            for child in list(gradient):
+                child_tag = _local_name(child)
+                if child_tag in _NON_VISUAL_SVG_TAGS:
+                    continue
+                if child_tag != 'stop':
+                    issues.add(
+                        f"{label} has unsupported direct child <{child_tag}>; "
+                        "gradient definitions may contain only direct <stop> children"
+                    )
+                    continue
+                stops.append(child)
+            if not stops:
+                issues.add(f"{label} requires at least one direct <stop> child")
+            for index, stop in enumerate(stops, start=1):
+                stop_label = f"{label} stop #{index}"
+                raw_offset = stop.get('offset')
+                if raw_offset is None or _normalized_gradient_value(raw_offset) is None:
+                    issues.add(
+                        f"{stop_label} offset must be explicit and within 0..1 "
+                        f"or 0%..100%; got {raw_offset!r}"
+                    )
+                style_values = (
+                    _parse_inline_style(stop.get('style'))
+                    if _parse_inline_style is not None else {}
+                )
+                if not (style_values.get('stop-color') or stop.get('stop-color')):
+                    issues.add(f"{stop_label} requires an explicit stop-color")
+
+        result['errors'].extend(sorted(issues))
 
     def _check_font_size_values(self, content: str, result: Dict):
-        """Require font-size values to be unitless numeric SVG px values."""
-        numeric_re = re.compile(r'^(?:\d+(?:\.\d+)?|\.\d+)$')
-        bad_values = set()
+        """Keep supported font-size units compatible and recommend unitless px."""
+        canonical_re = re.compile(r'^(?:\d+(?:\.\d+)?|\.\d+)$')
+        values = set()
 
         for match in re.finditer(r'\bfont-size\s*=\s*(["\'])(.*?)\1', content, re.IGNORECASE):
-            raw = match.group(2).strip()
-            if not numeric_re.fullmatch(raw):
-                bad_values.add(raw)
+            values.add(match.group(2).strip())
 
         for match in re.finditer(r'\bfont-size\s*:\s*([^;"\']+)', content, re.IGNORECASE):
-            raw = match.group(1).strip()
-            if not numeric_re.fullmatch(raw):
-                bad_values.add(raw)
+            values.add(match.group(1).strip())
 
-        if bad_values:
-            shown_values = sorted(bad_values)
+        if _parse_export_length is None:
+            result['warnings'].append(
+                "Unable to import svg_to_pptx length parser; skipped font-size syntax check"
+            )
+            return
+
+        unsupported = set()
+        drawingml_out_of_range = set()
+        compatible_noncanonical = set()
+        for raw in values:
+            parsed_px = _parse_export_length(raw, math.nan, font_size=16)
+            if not math.isfinite(parsed_px) or parsed_px < 0:
+                unsupported.add(raw)
+                continue
+            if _font_px_to_hpt is not None:
+                try:
+                    _font_px_to_hpt(parsed_px)
+                except ValueError:
+                    drawingml_out_of_range.add(raw)
+                    continue
+            if not canonical_re.fullmatch(raw):
+                compatible_noncanonical.add(raw)
+
+        if unsupported:
+            shown_values = sorted(unsupported)
             shown = ', '.join(shown_values[:5])
             more = len(shown_values) - 5
             suffix = f" (+{more} more)" if more > 0 else ""
             result['errors'].append(
-                f"font-size must be a unitless numeric px value; found {shown}{suffix}. "
-                "Write e.g. font-size=\"28\", never font-size=\"28px\" or \"21pt\"."
+                f"Unsupported font-size value(s): {shown}{suffix}. Use a finite "
+                "non-negative SVG length supported by svg_to_pptx."
+            )
+
+        if drawingml_out_of_range:
+            shown_values = sorted(drawingml_out_of_range)
+            shown = ', '.join(shown_values[:5])
+            more = len(shown_values) - 5
+            suffix = f" (+{more} more)" if more > 0 else ""
+            result['errors'].append(
+                f"font-size value(s) {shown}{suffix} are outside the DrawingML "
+                f"range sz={_DRAWINGML_TEXT_FONT_SIZE_MIN}.."
+                f"{_DRAWINGML_TEXT_FONT_SIZE_MAX} (1..4000pt); PowerPoint would "
+                "repair the exported file. Do not use tiny transparent text as "
+                "a placeholder carrier: leave a text carrier blank or use the "
+                "composite object proxy contract."
+            )
+
+        if compatible_noncanonical:
+            shown_values = sorted(compatible_noncanonical)
+            shown = ', '.join(shown_values[:5])
+            more = len(shown_values) - 5
+            suffix = f" (+{more} more)" if more > 0 else ""
+            result['warnings'].append(
+                f"Recommendation: font-size value(s) {shown}{suffix} are "
+                "converter-compatible; generated SVG should prefer unitless px "
+                "values such as font-size=\"28\". No change is required for export."
             )
 
     def _check_fonts(self, content: str, result: Dict):
@@ -829,16 +2340,23 @@ class SVGQualityChecker:
                 from PIL import Image as PILImage
                 with PILImage.open(img_path) as img:
                     actual_w, actual_h = img.size
+                source_bytes = img_path.stat().st_size
 
                 if actual_w < display_w or actual_h < display_h:
                     result['warnings'].append(
                         f"Image {href} is {actual_w}x{actual_h} but displayed at "
                         f"{int(display_w)}x{int(display_h)} — may appear blurry")
-                elif actual_w > display_w * 4 and actual_h > display_h * 4:
+                elif (
+                    actual_w > display_w * IMAGE_DOWNSIZE_WARN_RATIO
+                    and actual_h > display_h * IMAGE_DOWNSIZE_WARN_RATIO
+                    and source_bytes >= IMAGE_DOWNSIZE_WARN_MIN_BYTES
+                ):
+                    source_mib = source_bytes / (1024 * 1024)
                     result['warnings'].append(
                         f"Image {href} is {actual_w}x{actual_h} but displayed at "
-                        f"{int(display_w)}x{int(display_h)} — consider downsizing "
-                        f"to reduce file size")
+                        f"{int(display_w)}x{int(display_h)} and the source is "
+                        f"{source_mib:.1f} MiB — file-size advisory only, not an "
+                        f"aspect-ratio warning; consider a smaller source asset")
             except ImportError:
                 pass  # PIL not available, skip resolution check
             except Exception:
@@ -880,10 +2398,225 @@ class SVGQualityChecker:
             icon_path, _ = _resolve_icon_path(icon_name, icons_dir, fallback_dir)
             if not icon_path.exists():
                 fallback_msg = f", then {fallback_dir}" if fallback_dir else ""
+                suggestion = (
+                    _suggest_icon_name(icon_name, icons_dir, fallback_dir)
+                    if _suggest_icon_name is not None else None
+                )
+                hint = (
+                    f"; identifiers are case-sensitive; use '{suggestion}'"
+                    if suggestion else ""
+                )
                 result['errors'].append(
                     f"Icon not found: {icon_name} (searched {icons_dir}"
-                    f"{fallback_msg})"
+                    f"{fallback_msg}){hint}"
                 )
+
+    def _check_unsupported_visual_elements(
+        self,
+        root: ET.Element,
+        result: Dict,
+    ) -> None:
+        """Reject authored visual elements with no native converter dispatch."""
+        if _collect_unsupported_visuals is None:
+            result['errors'].append(
+                "Unable to import native visual-element preflight; "
+                "cannot verify SVG element support"
+            )
+            return
+        if _expand_local_use_references is None or _UseExpansionError is None:
+            result['errors'].append(
+                "Unable to import local <use> expansion; "
+                "cannot verify SVG element support"
+            )
+            return
+
+        expanded_root = copy.deepcopy(root)
+        try:
+            _expand_local_use_references(expanded_root)
+        except _UseExpansionError:
+            # _check_forbidden_elements already reports the actionable
+            # local-reference validation error.
+            return
+
+        unsupported = _collect_unsupported_visuals(
+            expanded_root,
+            allow_data_icon_use=True,
+        )
+        if not unsupported:
+            return
+
+        preview = '; '.join(unsupported[:8])
+        suffix = '' if len(unsupported) <= 8 else f'; +{len(unsupported) - 8} more'
+        result['errors'].append(
+            f"Unsupported visual SVG element(s) for native PPTX export: "
+            f"{preview}{suffix}"
+        )
+
+    def _check_preset_geometry_metadata(
+        self,
+        root: ET.Element,
+        result: Dict,
+    ) -> None:
+        """Validate round-trip preset metadata with the exporter's parser."""
+        marked = [
+            elem
+            for elem in root.iter()
+            if (
+                elem.get('data-pptx-prst') is not None
+                or elem.get('data-pptx-frame') is not None
+                or elem.get('data-pptx-geometry-status') is not None
+                or elem.get('data-pptx-geometry-reason') is not None
+                or elem.get('data-pptx-geometry-kind') is not None
+                or elem.get('data-pptx-custgeom') is not None
+                or elem.get('data-pptx-preview-sha256') is not None
+                or elem.get('data-pptx-shape-id') is not None
+                or elem.get('data-pptx-shape-scope') is not None
+                or elem.get('data-pptx-shape-style') is not None
+                or elem.get(_AUTHORING_ATTR) is not None
+                or any(attr.startswith('data-pptx-av-') for attr in elem.attrib)
+            )
+        ]
+        if not marked:
+            return
+        if _validate_preset_geometry_metadata is None:
+            result['errors'].append(
+                'Unable to import PPTX preset metadata validator; '
+                'cannot verify native shape restoration'
+            )
+            return
+
+        issues = set()
+        for elem in marked:
+            tag = _local_name(elem)
+            elem_id = elem.get('id')
+            label = f'<{tag} id="{elem_id}">' if elem_id else f'<{tag}>'
+            for error in _validate_preset_geometry_metadata(elem):
+                issues.add(f'{label} has invalid PPTX shape metadata: {error}')
+        if _validate_authored_preset_tree is None:
+            if any(
+                elem.get(_AUTHORING_ATTR) is not None
+                for elem in root.iter()
+            ):
+                issues.add(
+                    'Unable to import authored PPTX preset validator'
+                )
+        else:
+            for error in _validate_authored_preset_tree(root):
+                issues.add(f'Invalid authored PPTX preset: {error}')
+        if (
+            _svg_preset_preview_fingerprint is None
+            or _resolve_preset_preview_hash is None
+        ):
+            issues.add('Unable to import PPTX preset preview fingerprint validator')
+        else:
+            for elem in root.iter():
+                if (
+                    _local_name(elem) != 'g'
+                    or elem.get('data-pptx-object') not in {'shape', 'connector'}
+                    or elem.get('data-pptx-prst') is None
+                ):
+                    continue
+                try:
+                    expected = _resolve_preset_preview_hash(elem)
+                except ValueError as exc:
+                    elem_id = elem.get('id') or '(no id)'
+                    issues.add(
+                        f'<g id="{elem_id}"> has an invalid PPTX preset '
+                        f'preview contract: {exc}'
+                    )
+                    continue
+                if expected is None:
+                    continue
+                actual = _svg_preset_preview_fingerprint(elem)
+                if actual != expected:
+                    elem_id = elem.get('id') or '(no id)'
+                    issues.add(
+                        f'<g id="{elem_id}"> has a stale PPTX preset preview; '
+                        'update the native carrier or restore the generated detail paths'
+                    )
+        result['errors'].extend(sorted(issues))
+
+    def _check_preset_geometry_transforms(
+        self,
+        root: ET.Element,
+        result: Dict,
+    ) -> None:
+        """Reject preset transforms that DrawingML cannot represent exactly."""
+        helpers = (
+            _IDENTITY_MATRIX,
+            _matrix_multiply,
+            _parse_transform_matrix,
+            _rect_to_dml_xfrm,
+            _validate_dml_shape_matrix,
+        )
+        if any(helper is None for helper in helpers):
+            return
+
+        relevant: set[ET.Element] = set()
+
+        def mark_relevant(element: ET.Element) -> bool:
+            found = element.get('data-pptx-prst') is not None
+            for child in element:
+                found = mark_relevant(child) or found
+            if found:
+                relevant.add(element)
+            return found
+
+        mark_relevant(root)
+        issues = set()
+
+        def visit(element: ET.Element, parent_matrix) -> None:
+            if element not in relevant:
+                return
+            matrix = parent_matrix
+            transform = element.get('transform')
+            if transform:
+                try:
+                    local_matrix = _parse_transform_matrix(transform)
+                    matrix = _matrix_multiply(parent_matrix, local_matrix)
+                except ValueError as exc:
+                    issues.add(
+                        f'<{_local_name(element)}> has invalid preset '
+                        f'transform: {exc}'
+                    )
+                    return
+            if element.get('data-pptx-prst') is not None:
+                try:
+                    raw_frame = element.get('data-pptx-frame')
+                    if raw_frame:
+                        frame = tuple(
+                            float(part)
+                            for part in re.split(r'[\s,]+', raw_frame.strip())
+                        )
+                        if len(frame) != 4:
+                            raise ValueError(
+                                'data-pptx-frame must contain four numbers'
+                            )
+                        preset = element.get('data-pptx-prst') or ''
+                        _rect_to_dml_xfrm(
+                            frame[0],
+                            frame[1],
+                            frame[2],
+                            frame[3],
+                            matrix,
+                            preserve_degenerate_axes=(
+                                element.get('data-pptx-object') == 'connector'
+                                or preset in _CONNECTOR_PRESET_TYPES
+                            ),
+                        )
+                    else:
+                        _validate_dml_shape_matrix(matrix)
+                except ValueError as exc:
+                    elem_id = element.get('id') or '(no id)'
+                    issues.add(
+                        f'<{_local_name(element)} id="{elem_id}"> has '
+                        f'unsupported preset transform: {exc}'
+                    )
+            for child in element:
+                visit(child, matrix)
+
+        visit(root, _IDENTITY_MATRIX)
+        result['errors'].extend(sorted(issues))
 
     def _check_animation_group_ids(self, root: ET.Element, result: Dict):
         """Warn when visible top-level groups cannot be customized."""
@@ -921,10 +2654,8 @@ class SVGQualityChecker:
         preset name comes from `data-pptx-pattern` (e.g. `lgGrid` / `smGrid` /
         `dkUpDiag`). Two failure modes worth catching pre-export:
 
-        1. Missing annotation → converter silently falls back to `ltUpDiag`
-           (diagonal stripes) and picks `bg = #FFFFFF` when the pattern has
-           no child <rect>, turning a hand-authored grid into white-on-stripes
-           in PPTX.
+        1. Missing annotation → the converter compatibility fallback chooses
+           `ltUpDiag` (diagonal stripes), which is not an authoring contract.
         2. Invalid preset name → PPTX schema rejects the file; PowerPoint
            opens it with "needs to be repaired". OOXML
            `ST_PresetPatternVal` is a closed enum — only the names in
@@ -932,34 +2663,105 @@ class SVGQualityChecker:
            value) is the canonical mistake; the only grids are `smGrid` /
            `lgGrid` / `dotGrid`.
         """
-        for pattern in root.iter(f'{{{SVG_NS}}}pattern'):
+        definitions, _duplicates = _direct_defs_index(root)
+        referenced_patterns: set[str] = set()
+        for elem in root.iter():
+            style_values = (
+                _parse_inline_style(elem.get('style'))
+                if _parse_inline_style is not None else {}
+            )
+            fill = style_values.get('fill') or elem.get('fill')
+            match = re.fullmatch(r'url\(#([^)]+)\)', (fill or '').strip())
+            if match is None:
+                continue
+            definition = definitions.get(match.group(1))
+            if definition is not None and _local_name(definition) == 'pattern':
+                referenced_patterns.add(match.group(1))
+
+        for pattern in (
+            elem for elem in root.iter()
+            if _local_name(elem) == 'pattern'
+        ):
             pat_id = pattern.get('id', '<unnamed>')
             prst = pattern.get('data-pptx-pattern')
-            if not prst:
+            if pat_id in referenced_patterns and not prst:
                 result['warnings'].append(
-                    f"<pattern id=\"{pat_id}\"> has no data-pptx-pattern attribute — "
-                    "PPTX export will fall back to `ltUpDiag` (diagonal stripes), "
-                    "not your custom geometry. Add data-pptx-pattern=\"lgGrid\" / "
-                    "\"smGrid\" / etc. plus a <rect fill=\"<bg>\"/> child so the "
-                    "preset and bg color match your design."
+                    f"Fidelity warning: <pattern id=\"{pat_id}\"> has no "
+                    "data-pptx-pattern attribute, so the converter will use its "
+                    "compatible `ltUpDiag` fallback. Generated SVG should declare a valid "
+                    "data-pptx-pattern to make the intended preset explicit; "
+                    "set data-pptx-fg/data-pptx-bg or matching child paints "
+                    "when explicit pattern colors are required. No change is "
+                    "required for export."
                 )
-                continue
+            if pat_id in referenced_patterns and pattern.get('patternTransform'):
+                result['errors'].append(
+                    f"<pattern id=\"{pat_id}\"> cannot use patternTransform; "
+                    "the native preset mapping does not preserve custom tile transforms"
+                )
             if prst not in self._OOXML_PATTERN_PRESETS:
+                if not prst:
+                    continue
                 result['errors'].append(
                     f"<pattern id=\"{pat_id}\"> uses data-pptx-pattern=\"{prst}\" "
                     "which is not in OOXML ST_PresetPatternVal — exported PPTX "
                     "will fail schema validation ('needs to be repaired'). "
                     "Use one of: smGrid / lgGrid / dotGrid (grids), "
                     "ltUpDiag / dkUpDiag / cross / diagCross / weave / plaid / "
-                    "horzBrick (others); full enum in svg_quality_checker.py "
-                    "_OOXML_PATTERN_PRESETS."
+                    "horzBrick (others); see references/shared-standards.md §7 "
+                    "for the full authoring enum."
                 )
 
     def _check_native_object_markers(self, root: ET.Element, result: Dict) -> None:
         """Validate opt-in native table/chart markers before PPTX export."""
+        invalid_status_elements: set[ET.Element] = set()
+        for elem in root.iter():
+            if elem.tag.rsplit('}', 1)[-1] == 'metadata':
+                continue
+            has_status = any(
+                elem.get(name) is not None
+                for name in (
+                    'data-pptx-visual-status',
+                    'data-pptx-route-status',
+                    'data-pptx-native-status',
+                )
+            )
+            if not has_status:
+                continue
+            marker_id = elem.get('id') or elem.get('data-name') or '<unnamed>'
+            if (
+                _native_marker_status_errors is None
+                or _native_marker_release_block_reason is None
+            ):
+                result['errors'].append(
+                    "Unable to import native-object status validator; "
+                    f"cannot verify PPTX graphic {marker_id}"
+                )
+                continue
+            status_errors = _native_marker_status_errors(elem)
+            for error in status_errors:
+                result['errors'].append(
+                    f"PPTX graphic {marker_id} has invalid status metadata: {error}"
+                )
+            if status_errors:
+                invalid_status_elements.add(elem)
+                continue
+            if elem.get('data-pptx-route-status') == 'reconstruction-only':
+                route = (
+                    "--native-objects may reconstruct its active native marker"
+                    if (elem.get('data-pptx-native') or '').strip()
+                    else "default export keeps the visible placeholder"
+                )
+                result['warnings'].append(
+                    f"PPTX graphic {marker_id} is a reconstruction-only placeholder; "
+                    f"it has no baked preview and {route}"
+                )
+
         for elem in root.iter():
             status = elem.get('data-pptx-native-status')
             if not status or elem.tag.rsplit('}', 1)[-1] == 'metadata':
+                continue
+            if elem.get('data-pptx-native'):
                 continue
             marker_id = elem.get('id') or elem.get('data-name') or '<unnamed>'
             result['warnings'].append(
@@ -968,7 +2770,11 @@ class SVGQualityChecker:
 
         markers = [
             elem for elem in root.iter()
-            if elem.get('data-pptx-native') and elem.tag.rsplit('}', 1)[-1] != 'metadata'
+            if (
+                elem.get('data-pptx-native')
+                and elem.tag.rsplit('}', 1)[-1] != 'metadata'
+                and elem not in invalid_status_elements
+            )
         ]
         if not markers:
             return
@@ -999,6 +2805,7 @@ class SVGQualityChecker:
                     warnings = _validate_native_object_marker_with_warnings(
                         marker,
                         ancestors=ancestors_tuple,
+                        document_root=root,
                     )
                 except RuntimeError as exc:
                     result['errors'].append(
@@ -1023,6 +2830,7 @@ class SVGQualityChecker:
             for warning in _native_object_marker_warnings(
                 marker,
                 ancestors=ancestors_tuple,
+                document_root=root,
             ):
                 result['warnings'].append(
                     f"data-pptx-native marker {marker_id}: {warning}"
@@ -1034,29 +2842,141 @@ class SVGQualityChecker:
         svg_path: Path,
         result: Dict,
     ) -> None:
-        """Validate explicit template-export metadata when any is present."""
-        structure_attrs = {
-            'data-pptx-layer',
-            'data-pptx-layout',
-            'data-pptx-layout-name',
-            'data-pptx-placeholder',
-            'data-pptx-placeholder-bounds',
-            'data-pptx-placeholder-idx',
-            'data-pptx-editable',
-        }
-        if not any(
+        """Validate the intrinsic structured Master/Layout SVG contract."""
+        if not self.template_mode and svg_path.parent.name == 'svg_output':
+            declared_mode = _declared_pptx_structure_mode(
+                self._resolve_project_path(svg_path)
+            )
+            if declared_mode == 'flat':
+                forbidden_attrs = sorted({
+                    attr
+                    for elem in root.iter()
+                    for attr in _PPTX_STRUCTURE_ATTRS
+                    if elem.get(attr) is not None
+                })
+                if forbidden_attrs:
+                    result['errors'].append(
+                        f"{svg_path.name}: pptx_structure.mode: flat forbids "
+                        "Master/Layout/layer/placeholder metadata; remove "
+                        + ', '.join(forbidden_attrs)
+                    )
+                return
+            if declared_mode != 'structured':
+                # The project-level gate emits one actionable migration error.
+                # Avoid burying it under repeated per-page structure failures.
+                return
+        has_structure_metadata = any(
             elem.get(attr) is not None
             for elem in root.iter()
-            for attr in structure_attrs
-        ):
+            for attr in _PPTX_STRUCTURE_ATTRS
+        )
+        require_structure = bool(
+            self.template_mode
+            or svg_path.parent.name == 'svg_output'
+        )
+        if not has_structure_metadata and not require_structure:
             return
+        result['errors'].extend(_local_pptx_structure_errors(
+            root,
+            svg_path,
+            require_structure=require_structure,
+        ))
+        if svg_path.parent.name == 'svg_output':
+            self._append_structure_coverage_warnings(root, result)
         if _validate_template_structure_svg is None:
-            result['warnings'].append(
-                "Detected PPTX template structure metadata, but its validator "
-                "could not be imported; template export will still validate it."
+            result['errors'].append(
+                "Structured PPTX metadata validator could not be imported; "
+                "the quality gate cannot verify this SVG"
             )
             return
         result['errors'].extend(_validate_template_structure_svg(svg_path))
+        result['errors'] = list(dict.fromkeys(result['errors']))
+
+    @staticmethod
+    def _append_structure_coverage_warnings(
+        root: ET.Element,
+        result: Dict,
+    ) -> None:
+        """Warn on mapped pages that compile to bare Masters / empty Layouts.
+
+        Zero-slot and framing-only Layouts are legal contracts, so these stay
+        advisory warnings. They neither fail the workflow gate nor require a
+        per-warning disposition.
+        """
+        if not (root.get('data-pptx-layout') or '').strip():
+            return
+        has_layer_mark = any(
+            elem.get('data-pptx-layer') is not None
+            for elem in root.iter()
+        )
+        has_layout_atom = any(
+            child.get('data-pptx-layer') == 'layout'
+            for child in list(root)
+        )
+        has_placeholder = any(
+            elem.get('data-pptx-placeholder') is not None
+            for elem in root.iter()
+        )
+        if not has_layer_mark:
+            result['warnings'].append(
+                'Mapped page declares data-pptx-layout but no data-pptx-layer '
+                'mark; the exported Master gets no shared background/chrome '
+                'and the Layout gets no static framing. Generated templates '
+                'should mark the deck-wide '
+                'background data-pptx-layer="master" and this layout key\'s '
+                'framing data-pptx-layer="layout". No change or disposition '
+                'is required.'
+            )
+        if not has_placeholder and not has_layout_atom:
+            result['warnings'].append(
+                'Mapped page has no placeholder slot and no '
+                'data-pptx-layer="layout" atom; its Layout exports empty. '
+                'Generated templates should declare the slots the page actually '
+                'has (title / subtitle / '
+                'body / picture / slide-number / footer) and mark the layout '
+                'key\'s static framing unless this is intentionally a fixed '
+                'zero-slot composition. No change or disposition is required.'
+            )
+        elif not has_placeholder:
+            result['warnings'].append(
+                'Mapped Layout has static framing but no insertable '
+                'placeholder slot. Generated templates should declare the '
+                'slots the page actually has (title / subtitle / body / '
+                'picture / slide-number / footer) unless zero-slot is the '
+                'intended reusable contract. No change or disposition is required.'
+            )
+
+    def _check_semantic_markers(
+        self,
+        root: ET.Element,
+        svg_path: Path,
+        result: Dict,
+    ) -> None:
+        """Validate minimal compiler hints without changing SVG rendering."""
+        has_semantics = any(
+            elem.get(attr) is not None
+            for elem in root.iter()
+            for attr in _SEMANTIC_ATTRS
+        )
+        require_page_role = (
+            svg_path.parent.name in {'svg_output', 'svg_final'}
+            and root.get('data-pptx-layout') is None
+        )
+        if _validate_semantic_markers is None:
+            if has_semantics:
+                result['warnings'].append(
+                    "Detected Semantic SVG markers, but their validator could "
+                    "not be imported."
+                )
+            return
+        for issue in _validate_semantic_markers(
+            root,
+            require_page_role=require_page_role,
+        ):
+            if issue.severity == 'error':
+                result['errors'].append(issue.message)
+            else:
+                result['warnings'].append(issue.message)
 
     def _get_spec_lock(self, svg_path: Path):
         """Locate and parse spec_lock.md near the SVG. Returns dict or None.
@@ -1085,7 +3005,8 @@ class SVGQualityChecker:
     def _check_spec_lock_drift(self, content: str, svg_path: Path, result: Dict):
         """Detect values used in the SVG that fall outside spec_lock.md.
 
-        Covers colors (fill / stroke / stop-color), font-family, and font-size.
+        Covers colors (fill / stroke / stop-color / flood-color / pattern
+        metadata), font-family, and font-size.
         Emits per-file warnings summarising the drift counts; exact drifting
         values are accumulated in self._drift_summary for the end-of-run
         aggregation. When spec_lock.md is missing, silently skip (consistent
@@ -1098,8 +3019,14 @@ class SVGQualityChecker:
         # Build allow-sets from the lock
         allowed_colors = set()
         for v in lock.get('colors', {}).values():
-            if HEX_VALUE_RE.fullmatch(v):
-                allowed_colors.add(v.upper())
+            if _parse_export_color is not None:
+                color, _alpha = _parse_export_color(v)
+                if color:
+                    allowed_colors.add(color)
+            else:
+                color = _normalize_hex_rgb(v)
+                if color:
+                    allowed_colors.add(color)
 
         typo = lock.get('typography', {})
         numeric_size_re = re.compile(r'^(?:\d+(?:\.\d+)?|\.\d+)$')
@@ -1151,13 +3078,28 @@ class SVGQualityChecker:
 
         # Scan SVG for used values
         color_drifts = set()
-        for attr in ('fill', 'stroke', 'stop-color'):
+        for attr in (
+            'fill', 'stroke', 'stop-color', 'flood-color',
+            'data-pptx-fg', 'data-pptx-bg',
+        ):
             for raw_value in self._svg_property_values(content, attr):
-                if not HEX_VALUE_RE.fullmatch(raw_value):
+                normalized = raw_value.strip()
+                if normalized.lower() in {'none', 'transparent'} or re.fullmatch(
+                    r'url\(#[^)]+\)', normalized
+                ):
                     continue
-                val = raw_value.upper()
+                if _BARE_HEX_VALUE_RE.fullmatch(normalized):
+                    continue
+                if _parse_export_color is not None:
+                    val, _alpha = _parse_export_color(normalized)
+                    if val is None:
+                        continue
+                else:
+                    val = _normalize_hex_rgb(normalized)
+                    if val is None:
+                        continue
                 if val not in allowed_colors:
-                    color_drifts.add(val)
+                    color_drifts.add(f'#{val}')
 
         font_drifts = set()
         for val in self._font_family_values(content):
@@ -1375,6 +3317,8 @@ class SVGQualityChecker:
             return 'viewBox issues'
         elif 'foreignObject' in error_msg:
             return 'foreignObject'
+        elif 'paint' in error_msg.lower() or 'color value' in error_msg.lower():
+            return 'Paint issues'
         elif 'font' in error_msg.lower():
             return 'Font issues'
         else:
@@ -1395,13 +3339,15 @@ class SVGQualityChecker:
 
         if not dir_path.exists():
             print(f"[ERROR] Directory does not exist: {directory}")
+            self.summary['errors'] += 1
+            self.issue_types['Input issues'] += 1
             return []
 
-        # Brand-only template directories (templates/brands/<id>/) have no SVG
-        # roster — design_spec.md frontmatter declares `kind: brand`. Skip SVG
-        # checks entirely; brand validation lives in register_template.py.
+        # Brand-only template workspaces have no SVG roster. Resolve the current
+        # nested spec first and keep legacy-flat roots readable.
         if self.template_mode and dir_path.is_dir():
-            spec = dir_path / 'design_spec.md'
+            nested_spec = dir_path / 'templates' / 'design_spec.md'
+            spec = nested_spec if nested_spec.is_file() else dir_path / 'design_spec.md'
             if spec.exists() and _design_spec_is_brand(spec):
                 print(
                     f"[INFO] Brand directory detected (kind: brand) — "
@@ -1428,7 +3374,9 @@ class SVGQualityChecker:
                 svg_files = sorted(svg_output.glob('*.svg'))
 
         if not svg_files:
-            print(f"[WARN] No SVG files found")
+            print(f"[ERROR] No SVG files found in: {directory}")
+            self.summary['errors'] += 1
+            self.issue_types['Input issues'] += 1
             return []
 
         print(f"\n[SCAN] Checking {len(svg_files)} SVG file(s)...\n")
@@ -1437,10 +3385,19 @@ class SVGQualityChecker:
             result = self.check_file(str(svg_file), expected_format)
             self._print_result(result)
 
-        self._check_pptx_structure_contract(dir_path, svg_files)
-        if self.template_mode and dir_path.is_dir():
-            self._check_template_contract(dir_path, svg_files)
-        elif dir_path.is_dir():
+        if self.template_mode:
+            check_structure = _template_structure_checks_enabled(dir_path)
+            if check_structure:
+                self._check_pptx_structure_contract(dir_path, svg_files)
+            if dir_path.is_dir():
+                self._check_template_contract(
+                    dir_path,
+                    svg_files,
+                    check_structure=check_structure,
+                )
+        elif _CHECK_PPTX_STRUCTURED_PROJECT:
+            self._check_pptx_structure_contract(dir_path, svg_files)
+        if not self.template_mode and dir_path.is_dir():
             self._check_animation_config_contract(dir_path)
             self._check_illustration_resource_contract(dir_path)
 
@@ -1451,62 +3408,45 @@ class SVGQualityChecker:
         target_path: Path,
         svg_files: List[Path],
     ) -> None:
-        """Validate project-level layout reuse and spec_lock mappings."""
-        if (
-            _load_pptx_structure_lock is None
-            or _parse_template_structure_slides is None
-            or _template_lock_errors is None
-            or _TemplateStructureError is None
-        ):
-            return
+        """Validate the all-page structured lock and reusable contracts."""
         project_path = self._resolve_project_path(target_path)
-        try:
-            structure_lock = _load_pptx_structure_lock(project_path)
-        except _TemplateStructureError as exc:
-            self._pptx_structure_issues.append(('error', str(exc)))
+        standard_project = bool(
+            not self.template_mode
+            and (project_path / 'svg_output').is_dir()
+        )
+        declared_mode = (
+            _declared_pptx_structure_mode(project_path)
+            if standard_project
+            else None
+        )
+        if standard_project and declared_mode in {'flat', 'structured'}:
+            self._pptx_structure_issues.extend(
+                ('error', message)
+                for message in _generated_theme_contract_errors(project_path)
+            )
+        if standard_project and declared_mode == 'flat':
+            if (
+                _load_pptx_structure_lock is None
+                or _TemplateStructureError is None
+            ):
+                self._pptx_structure_issues.append((
+                    'error',
+                    'Flat PPTX project validation is unavailable because the '
+                    'template_structure module could not be imported.',
+                ))
+                return
+            try:
+                structure_lock = _load_pptx_structure_lock(project_path)
+            except _TemplateStructureError as exc:
+                self._pptx_structure_issues.append(('error', str(exc)))
+                return
+            if structure_lock is None or structure_lock.mode != 'flat':
+                self._pptx_structure_issues.append((
+                    'error',
+                    'spec_lock.md must contain one complete '
+                    'pptx_structure.mode: flat contract.',
+                ))
             return
-
-        if (
-            structure_lock is not None
-            and structure_lock.mode == 'template'
-            and structure_lock.template_adherence in {'strict', 'adaptive'}
-            and _parse_spec_lock is not None
-        ):
-            lock_path = project_path / 'spec_lock.md'
-            lock = _parse_spec_lock(lock_path)
-            page_layouts = lock.get('page_layouts', {})
-            expected_pages = {f'P{index:02d}' for index in range(1, len(svg_files) + 1)}
-            missing_pages = sorted(expected_pages - set(page_layouts))
-            if missing_pages:
-                self._pptx_structure_issues.append((
-                    'error',
-                    'spec_lock.md template export requires page_layouts '
-                    'rows for every generated page; missing: ' + ', '.join(missing_pages),
-                ))
-            template_dir = project_path / 'templates'
-            template_svgs = {path.stem for path in template_dir.glob('*.svg')}
-            missing_templates = sorted({
-                value.strip().removesuffix('.svg')
-                for page, value in page_layouts.items()
-                if page in expected_pages
-                and value.strip().removesuffix('.svg') not in template_svgs
-            })
-            if missing_templates:
-                self._pptx_structure_issues.append((
-                    'error',
-                    'spec_lock.md template export references missing '
-                    'template SVG(s): ' + ', '.join(missing_templates),
-                ))
-
-        structure_attrs = {
-            'data-pptx-layer',
-            'data-pptx-layout',
-            'data-pptx-layout-name',
-            'data-pptx-placeholder',
-            'data-pptx-placeholder-bounds',
-            'data-pptx-placeholder-idx',
-            'data-pptx-editable',
-        }
         has_metadata = False
         for svg_path in svg_files:
             try:
@@ -1516,54 +3456,338 @@ class SVGQualityChecker:
             if any(
                 elem.get(attr) is not None
                 for elem in root.iter()
-                for attr in structure_attrs
+                for attr in _PPTX_STRUCTURE_ATTRS
             ):
                 has_metadata = True
                 break
-        locked_mode = structure_lock.mode if structure_lock is not None else None
-        structure_locked = locked_mode in {'template', 'preserve'}
-        if not has_metadata and not structure_locked:
+
+        if not standard_project and not self.template_mode and not has_metadata:
+            return
+        if (
+            _load_pptx_structure_lock is None
+            or _parse_template_structure_slide is None
+            or _parse_template_structure_slides is None
+            or _structure_subtree_signature is None
+            or _template_lock_errors is None
+            or _TemplateStructureError is None
+        ):
+            self._pptx_structure_issues.append((
+                'error',
+                'Structured PPTX project validation is unavailable because the '
+                'template_structure module could not be imported.',
+            ))
+            return
+
+        if self.template_mode:
+            try:
+                specs = _parse_template_structure_slides(svg_files)
+            except _TemplateStructureError as exc:
+                self._pptx_structure_issues.append(('error', str(exc)))
+                return
+            self._pptx_structure_issues.extend(
+                ('error', message)
+                for message in self._shared_fixed_layer_errors(specs)
+            )
+            self._pptx_structure_issues.extend(
+                ('warning', message)
+                for message in self._duplicate_layout_key_warnings(specs)
+            )
+            return
+
+        if standard_project and declared_mode != 'structured':
+            label = repr(declared_mode) if declared_mode else (
+                'missing (legacy implicit baseline)'
+            )
+            self._pptx_structure_issues.append((
+                'error',
+                'release SVG projects require an explicit spec_lock.md '
+                'pptx_structure.mode: flat (free design / brand-only) or '
+                f'structured (deck/layout template); found {label}. New '
+                'free-design projects use mode: flat; restore legacy '
+                'template/structured metadata by following skills/ppt-master/'
+                'workflows/restore-pptx-structure.md before export.',
+            ))
             return
 
         try:
-            if locked_mode == 'preserve':
-                if _parse_preserve_structure_slides is None:
-                    return
-                specs = _parse_preserve_structure_slides(svg_files)
+            structure_lock = _load_pptx_structure_lock(project_path)
+        except _TemplateStructureError as exc:
+            self._pptx_structure_issues.append(('error', str(exc)))
+            return
+        if structure_lock is None or structure_lock.mode != 'structured':
+            self._pptx_structure_issues.append((
+                'error',
+                'spec_lock.md must contain one complete '
+                'pptx_structure.mode: structured contract.',
+            ))
+            return
+        complete_roster = target_path.is_dir()
+        try:
+            if not complete_roster and target_path.is_file():
+                sibling_files = sorted(target_path.parent.glob('*.svg'))
+                resolved_target = target_path.resolve()
+                slide_num = next(
+                    (
+                        index
+                        for index, sibling in enumerate(sibling_files, start=1)
+                        if sibling.resolve() == resolved_target
+                    ),
+                    1,
+                )
+                specs = [
+                    _parse_template_structure_slide(target_path, slide_num)
+                ]
             else:
                 specs = _parse_template_structure_slides(svg_files)
         except _TemplateStructureError as exc:
             self._pptx_structure_issues.append(('error', str(exc)))
             return
-        if not structure_locked:
-            return
-        self._pptx_structure_issues.extend(
-            ('error', message)
-            for message in _template_lock_errors(specs, structure_lock)
-        )
-        if locked_mode != 'preserve':
-            return
-        if (
-            _load_native_structure_contract is None
-            or _native_structure_lock_errors is None
-        ):
-            self._pptx_structure_issues.append((
-                'error',
-                'Preserve mode validator could not load the native structure contract.',
-            ))
-            return
-        try:
-            contract = _load_native_structure_contract(structure_lock)
-        except _TemplateStructureError as exc:
-            self._pptx_structure_issues.append(('error', str(exc)))
-            return
-        self._pptx_structure_issues.extend(
-            ('error', message)
-            for message in _native_structure_lock_errors(
-                specs,
-                structure_lock,
-                contract,
+
+        if complete_roster:
+            self._pptx_structure_issues.extend(
+                ('error', message)
+                for message in _template_lock_errors(specs, structure_lock)
             )
+        else:
+            self._pptx_structure_issues.extend(
+                ('error', message)
+                for message in self._partial_structure_lock_errors(
+                    specs,
+                    structure_lock,
+                )
+            )
+        if _template_prototype_errors is not None:
+            self._pptx_structure_issues.extend(
+                ('error', message)
+                for message in _template_prototype_errors(
+                    specs,
+                    structure_lock,
+                    require_complete_roster=complete_roster,
+                )
+            )
+        self._pptx_structure_issues.extend(
+            ('error', message)
+            for message in self._shared_fixed_layer_errors(specs)
+        )
+        self._pptx_structure_issues.extend(
+            ('warning', message)
+            for message in self._duplicate_layout_key_warnings(specs)
+        )
+
+    @staticmethod
+    def _partial_structure_lock_errors(specs, structure_lock) -> List[str]:
+        """Compare explicitly checked pages without requiring the full roster."""
+        references = {
+            reference.slide_num: reference
+            for reference in structure_lock.layouts
+        }
+        master_names = {
+            master.master_key: master.master_name
+            for master in structure_lock.masters
+        }
+        definitions = {
+            definition.layout_key: definition
+            for definition in structure_lock.layout_definitions
+        }
+        errors: List[str] = []
+        for spec in specs:
+            page = f"P{spec.slide_num:02d}"
+            reference = references.get(spec.slide_num)
+            if reference is None:
+                errors.append(
+                    f"spec_lock.md page_pptx_layouts is missing {page}"
+                )
+                continue
+            definition = definitions.get(reference.layout_key)
+            if definition is None:
+                errors.append(
+                    f"spec_lock.md pptx_layouts is missing Layout "
+                    f"{reference.layout_key!r}"
+                )
+                continue
+            if spec.master_key != definition.master_key:
+                errors.append(
+                    f"{spec.svg_path.name}: data-pptx-master={spec.master_key!r} "
+                    f"does not match spec_lock Layout {reference.layout_key!r} "
+                    f"Master key {definition.master_key!r}"
+                )
+            if spec.layout_key != reference.layout_key:
+                errors.append(
+                    f"{spec.svg_path.name}: data-pptx-layout={spec.layout_key!r} "
+                    f"does not match spec_lock {page} layout key "
+                    f"{reference.layout_key!r}"
+                )
+            if spec.layout_name != definition.layout_name:
+                errors.append(
+                    f"{spec.svg_path.name}: data-pptx-layout-name="
+                    f"{spec.layout_name!r} does not match spec_lock Layout "
+                    f"{reference.layout_key!r} name {definition.layout_name!r}"
+                )
+            expected_master_name = master_names.get(spec.master_key)
+            if expected_master_name != spec.master_name:
+                errors.append(
+                    f"{spec.svg_path.name}: data-pptx-master-name="
+                    f"{spec.master_name!r} does not match spec_lock Master "
+                    f"{spec.master_key!r} name {expected_master_name!r}"
+                )
+        return errors
+
+    def _duplicate_layout_key_warnings(self, specs) -> List[str]:
+        """Flag distinct layout keys whose static contracts are identical.
+
+        Keys split by page topic over one shared skeleton compile into
+        duplicate PowerPoint Layouts; the fingerprint compares the
+        id-insensitive layout-layer drawing plus the placeholder contract.
+        """
+        prototypes: Dict[Tuple[str, str], Path] = {}
+        for spec in specs:
+            prototypes.setdefault(
+                (getattr(spec, 'master_key', ''), spec.layout_key),
+                spec.svg_path,
+            )
+        if len(prototypes) < 2:
+            return []
+        fingerprint_keys: Dict[tuple, List[str]] = {}
+        for (master_key, layout_key), svg_path in prototypes.items():
+            fingerprint = self._layout_contract_fingerprint(svg_path)
+            if fingerprint is None:
+                continue
+            fingerprint_keys.setdefault(
+                (master_key, fingerprint),
+                [],
+            ).append(layout_key)
+        messages = []
+        for keys in fingerprint_keys.values():
+            if len(keys) < 2:
+                continue
+            joined = ', '.join(sorted(keys))
+            messages.append(
+                f"layout keys {joined} declare identical static Layout framing "
+                "and placeholder contracts; they compile to duplicate Layouts. "
+                "Either merge them into one reusable key (spec_lock.md "
+                "pptx_layouts + each SVG root), or — when their reusable "
+                "contracts genuinely differ — assign distinct explicit default "
+                "placeholder bounds and/or mark only truly stable framing as "
+                'data-pptx-layer="layout". Slide-local content geometry does not '
+                "define a Layout. This recommendation is advisory; no change or "
+                "disposition is required."
+            )
+        return messages
+
+    @classmethod
+    def _shared_fixed_layer_errors(cls, specs) -> List[str]:
+        """Reject fixed atoms whose payload varies inside one reuse scope."""
+        master_groups = defaultdict(list)
+        layout_groups = defaultdict(list)
+        for spec in specs:
+            master_groups[spec.master_key].append(spec)
+            layout_groups[(spec.master_key, spec.layout_key)].append(spec)
+
+        try:
+            errors = cls._fixed_layer_group_errors(master_groups, 'master')
+            errors.extend(cls._fixed_layer_group_errors(layout_groups, 'layout'))
+        except _TemplateStructureError as exc:
+            return [str(exc)]
+        return errors
+
+    @classmethod
+    def _fixed_layer_group_errors(cls, groups, layer: str) -> List[str]:
+        """Compare fixed atom payloads across grouped slide specifications."""
+        errors = []
+        for scope_key, group_specs in groups.items():
+            if len(group_specs) < 2:
+                continue
+            variants = defaultdict(lambda: defaultdict(list))
+            for spec in group_specs:
+                payloads = cls._fixed_layer_payloads(spec, layer)
+                for element_id, payload in payloads.items():
+                    variants[element_id][payload].append(spec)
+            for element_id, payload_specs in variants.items():
+                if len(payload_specs) < 2:
+                    continue
+                slide_names = ', '.join(
+                    spec.svg_path.name
+                    for spec in sorted(group_specs, key=lambda item: item.slide_num)
+                )
+                if layer == 'master':
+                    scope = f"Master {scope_key!r}"
+                else:
+                    master_key, layout_key = scope_key
+                    scope = (
+                        f"Layout {layout_key!r} under Master {master_key!r}"
+                    )
+                if element_id is None:
+                    subject = "fixed visual resources"
+                    verb = "differ"
+                else:
+                    subject = f"fixed element {element_id!r}"
+                    verb = "differs"
+                errors.append(
+                    f"{scope} {subject} {verb} across slides: "
+                    f"{slide_names}. Values marked data-pptx-layer={layer!r} must "
+                    "remain identical throughout their reuse scope; move variable "
+                    "text or images into a placeholder slot or keep them Slide-local."
+                )
+        return errors
+
+    @staticmethod
+    def _fixed_layer_payloads(spec, layer: str) -> Dict[object, tuple]:
+        """Return resolved fixed-layer visual payloads keyed by SVG id."""
+        elements = (
+            spec.master_elements if layer == 'master' else spec.layout_elements
+        )
+        if not elements:
+            return {}
+        signature = _structure_subtree_signature(
+            spec.svg_path,
+            elements,
+            include_skin=True,
+            include_text=True,
+            asset_identity=True,
+        )
+        return {
+            None if element_id == '__visual_resources__' else element_id: payload
+            for element_id, payload in signature
+        }
+
+    @staticmethod
+    def _layout_contract_fingerprint(svg_path: Path):
+        """Id-insensitive static contract: layout-layer XML + placeholder slots."""
+        try:
+            root = ET.parse(str(svg_path)).getroot()
+        except (OSError, ET.ParseError):
+            return None
+        layout_parts = []
+        placeholder_parts = []
+        for child in list(root):
+            if child.get('data-pptx-layer') == 'layout':
+                clone = copy.deepcopy(child)
+                for elem in clone.iter():
+                    elem.attrib.pop('id', None)
+                xml = ET.tostring(clone, encoding='unicode')
+                layout_parts.append(re.sub(r'\s+', ' ', xml).strip())
+            placeholder = child.get('data-pptx-placeholder')
+            if placeholder is not None:
+                carrier_tags = tuple(
+                    grandchild.tag.rsplit('}', 1)[-1]
+                    for grandchild in list(child)
+                    if (
+                        grandchild.get('data-pptx-placeholder-carrier') or ''
+                    ).strip().lower() == 'true'
+                )
+                placeholder_parts.append((
+                    placeholder,
+                    child.tag.rsplit('}', 1)[-1],
+                    child.get('data-pptx-placeholder-bounds') or '',
+                    child.get('data-pptx-placeholder-idx') or '',
+                    (
+                        child.get('data-pptx-placeholder-binding') or 'carrier'
+                    ).strip().lower(),
+                    carrier_tags,
+                ))
+        return (
+            tuple(layout_parts),
+            tuple(sorted(placeholder_parts)),
         )
 
     def _check_illustration_resource_contract(self, dir_path: Path) -> None:
@@ -1666,11 +3890,18 @@ class SVGQualityChecker:
     @staticmethod
     def _resolve_project_path(dir_path: Path) -> Path:
         """Resolve a checker target directory to its project root."""
-        if _project_root_for_svg_path is not None and dir_path.name in _SVG_WORK_DIR_NAMES:
-            return _project_root_for_svg_path(dir_path)
-        if (dir_path / 'svg_output').exists() or (dir_path / 'design_spec.md').exists():
-            return dir_path
-        return dir_path.parent
+        candidate = dir_path.parent if dir_path.is_file() else dir_path
+        if (
+            _project_root_for_svg_path is not None
+            and candidate.name in _SVG_WORK_DIR_NAMES
+        ):
+            return _project_root_for_svg_path(candidate)
+        if (
+            (candidate / 'svg_output').exists()
+            or (candidate / 'design_spec.md').exists()
+        ):
+            return candidate
+        return candidate.parent
 
     @staticmethod
     def _split_md_table_row(line: str) -> List[str]:
@@ -1938,9 +4169,21 @@ class SVGQualityChecker:
 
     def _check_animation_config_contract(self, dir_path: Path) -> None:
         """Project-level animations.json reference checks."""
-        if _load_animation_config is None or _validate_animation_config is None:
-            return
         project_path = self._resolve_project_path(dir_path)
+        config_path = project_path / 'animations.json'
+        if (
+            _load_animation_config is None
+            or _validate_animation_config is None
+            or _validate_animation_config_errors is None
+            or _validate_transition_config is None
+        ):
+            if config_path.is_file():
+                detail = _animation_config_import_error or 'unknown import error'
+                self._animation_issues.append((
+                    'error',
+                    f'animations.json validation is unavailable: {detail}',
+                ))
+            return
         try:
             config = _load_animation_config(project_path)
         except Exception as exc:
@@ -1948,17 +4191,35 @@ class SVGQualityChecker:
             return
         if not config:
             return
-        for warning in _validate_animation_config(project_path, config):
-            self._animation_issues.append(('warning', warning))
+        fatal_errors = list(dict.fromkeys(
+            _validate_transition_config(config)
+            + _validate_animation_config_errors(config)
+        ))
+        for error in fatal_errors:
+            self._animation_issues.append(('error', error))
+        for message in _validate_animation_config(project_path, config):
+            severity = (
+                'warning'
+                if ' has no id and cannot be customized in animations.json' in message
+                else 'error'
+            )
+            self._animation_issues.append((severity, message))
 
-    def _check_template_contract(self, dir_path: Path,
-                                 svg_files: List[Path]) -> None:
+    def _check_template_contract(
+        self,
+        dir_path: Path,
+        svg_files: List[Path],
+        *,
+        check_structure: bool,
+    ) -> None:
         """Check reusable-template structure, roster, and placeholder hints.
 
         - **Roster mismatch (orphan / missing)** is reported as an *error*: a
           stale roster will produce a wrong ``layouts_index.json`` entry.
-        - **Explicit structure gaps** are errors: every reusable SVG declares
-          its Layout and at least one direct structure/placeholder element.
+        - **Explicit structure gaps** are errors when positive structure checks
+          are enabled: every current reusable SVG declares its Master and Layout
+          identity. Zero-placeholder Layouts are valid. Legacy template-mode
+          packages fail and must run the structure-restoration workflow.
         - **Placeholder gaps** are reported as *warnings*. Templates may
           legitimately omit conventional placeholders or swap them out (e.g.
           ``{{CLOSING_MESSAGE}}`` instead of ``{{THANK_YOU}}``), and a content
@@ -1969,134 +4230,114 @@ class SVGQualityChecker:
         Issues are aggregated and printed in :py:meth:`print_summary` so the
         per-file report stays focused on intrinsic SVG validity.
         """
-        native_contract_path = dir_path / 'native_structure.json'
-        source_template_path = dir_path / 'source_template.pptx'
-        native_contract = None
-        for svg_file in svg_files:
-            try:
-                root = ET.parse(svg_file).getroot()
-            except (OSError, ET.ParseError):
-                continue
-            if not root.get('data-pptx-layout'):
-                self._template_issues.append((
-                    'error',
-                    'explicit_structure_missing',
-                    f"{svg_file.name}: reusable templates require root "
-                    "data-pptx-layout metadata",
-                ))
-            if not root.get('data-pptx-layout-name'):
-                self._template_issues.append((
-                    'error',
-                    'explicit_structure_name_missing',
-                    f"{svg_file.name}: reusable templates require root "
-                    "data-pptx-layout-name metadata",
-                ))
-            has_structure_child = any(
-                child.get('data-pptx-layer') in {'master', 'layout'}
-                or child.get('data-pptx-placeholder')
-                for child in list(root)
-            )
-            if not has_structure_child:
-                self._template_issues.append((
-                    'error',
-                    'explicit_structure_empty',
-                    f"{svg_file.name}: reusable templates require at least one "
-                    "direct master/layout/placeholder declaration",
-                ))
-        if native_contract_path.exists() != source_template_path.exists():
-            self._template_issues.append((
-                'error',
-                'native_structure_pair',
-                "native_structure.json and source_template.pptx must be shipped together",
-            ))
-        elif native_contract_path.exists():
-            if (
-                _PptxStructureLock is None
-                or _load_native_structure_contract is None
-                or _TemplateStructureError is None
-            ):
-                self._template_issues.append((
-                    'error',
-                    'native_structure_validator',
-                    "native structure validator is unavailable",
-                ))
-            else:
-                try:
-                    native_contract = _load_native_structure_contract(_PptxStructureLock(
-                        mode='preserve',
-                        source_template=source_template_path,
-                        native_structure=native_contract_path,
-                    ))
-                except _TemplateStructureError as exc:
-                    self._template_issues.append((
-                        'error',
-                        'native_structure_invalid',
-                        str(exc),
-                    ))
-        if (
-            native_contract is not None
-            and _PptxLayoutReference is not None
-            and _parse_preserve_structure_slides is not None
-            and _template_lock_errors is not None
-            and _native_structure_lock_errors is not None
-        ):
-            try:
-                native_specs = _parse_preserve_structure_slides(svg_files)
-                native_layouts = {
-                    layout.key: layout for layout in native_contract.layouts
-                }
-                references = tuple(
-                    _PptxLayoutReference(
-                        slide_num=spec.slide_num,
-                        layout_key=spec.layout_key,
-                        layout_name=(
-                            native_layouts[spec.layout_key].name
-                            if spec.layout_key in native_layouts
-                            else spec.layout_name
-                        ),
-                    )
-                    for spec in native_specs
-                )
-                native_lock = _PptxStructureLock(
-                    mode='preserve',
-                    layouts=references,
-                    source_template=source_template_path,
-                    native_structure=native_contract_path,
-                )
-                native_errors = _template_lock_errors(native_specs, native_lock)
-                native_errors.extend(_native_structure_lock_errors(
-                    native_specs,
-                    native_lock,
-                    native_contract,
-                ))
-                for message in native_errors:
-                    self._template_issues.append((
-                        'error',
-                        'native_structure_svg',
-                        message,
-                    ))
-            except _TemplateStructureError as exc:
-                self._template_issues.append((
-                    'error',
-                    'native_structure_svg',
-                    str(exc),
-                ))
-
         spec_path = dir_path / 'design_spec.md'
         spec_text = spec_path.read_text(encoding='utf-8') if spec_path.exists() else ""
-        mode_match = re.search(
-            r'^native_structure_mode:\s*([A-Za-z0-9_-]+)\s*$',
-            spec_text,
-            re.MULTILINE,
-        )
-        declared_structure_mode = mode_match.group(1).lower() if mode_match else None
-        if native_contract is None and declared_structure_mode != 'template':
+        declared_structure_mode = _declared_template_structure_mode(dir_path)
+        mode_error_recorded = False
+        if declared_structure_mode != 'structured':
+            mode_error_recorded = True
             self._template_issues.append((
                 'error',
                 'explicit_structure_mode',
                 "design_spec.md frontmatter must declare "
-                "native_structure_mode: template",
+                "native_structure_mode: structured; legacy template-mode "
+                "workspaces must run restore-pptx-structure",
             ))
+        if check_structure:
+            native_contract_path = dir_path / 'native_structure.json'
+            source_template_path = dir_path / 'source_template.pptx'
+            legacy_structure_detected = False
+            for svg_file in svg_files:
+                try:
+                    root = ET.parse(svg_file).getroot()
+                except (OSError, ET.ParseError):
+                    continue
+                if not root.get('data-pptx-master'):
+                    legacy_structure_detected = True
+                    self._template_issues.append((
+                        'error',
+                        'explicit_master_missing',
+                        f"{svg_file.name}: reusable templates require root "
+                        "data-pptx-master metadata",
+                    ))
+                if not root.get('data-pptx-master-name'):
+                    legacy_structure_detected = True
+                    self._template_issues.append((
+                        'error',
+                        'explicit_master_name_missing',
+                        f"{svg_file.name}: reusable templates require root "
+                        "data-pptx-master-name metadata",
+                    ))
+                if not root.get('data-pptx-layout'):
+                    self._template_issues.append((
+                        'error',
+                        'explicit_structure_missing',
+                        f"{svg_file.name}: reusable templates require root "
+                        "data-pptx-layout metadata",
+                    ))
+                if not root.get('data-pptx-layout-name'):
+                    self._template_issues.append((
+                        'error',
+                        'explicit_structure_name_missing',
+                        f"{svg_file.name}: reusable templates require root "
+                        "data-pptx-layout-name metadata",
+                    ))
+                if root.get('data-pptx-layout-kind') is not None:
+                    legacy_structure_detected = True
+                    self._template_issues.append((
+                        'error',
+                        'deck_instance_layout_kind',
+                        f"{svg_file.name}: reusable template prototypes must omit "
+                        "legacy data-pptx-layout-kind metadata",
+                    ))
+                if any(
+                    child.get('data-pptx-placeholder') is not None
+                    and child.tag.rsplit('}', 1)[-1] != 'g'
+                    for child in list(root)
+                ):
+                    legacy_structure_detected = True
+                missing_bounds = [
+                    child.get('id') or child.tag.rsplit('}', 1)[-1]
+                    for child in list(root)
+                    if child.get('data-pptx-placeholder') is not None
+                    and child.get('data-pptx-placeholder-bounds') is None
+                ]
+                if missing_bounds:
+                    legacy_structure_detected = True
+                    self._template_issues.append((
+                        'error',
+                        'placeholder_bounds_missing',
+                        f"{svg_file.name}: reusable templates require "
+                        "explicit design-zone data-pptx-placeholder-bounds; missing: "
+                        + ', '.join(missing_bounds),
+                    ))
+            if native_contract_path.exists() or source_template_path.exists():
+                legacy_structure_detected = True
+                self._template_issues.append((
+                    'error',
+                    'legacy_native_structure_pair',
+                    "legacy native_structure.json/source_template.pptx template "
+                    "contracts must be restored through "
+                    "skills/ppt-master/workflows/restore-pptx-structure.md",
+                ))
+
+            if declared_structure_mode != 'structured':
+                legacy_structure_detected = True
+                if not mode_error_recorded:
+                    self._template_issues.append((
+                        'error',
+                        'explicit_structure_mode',
+                        "design_spec.md frontmatter must declare "
+                        "native_structure_mode: structured",
+                    ))
+            if legacy_structure_detected:
+                self._template_issues.append((
+                    'error',
+                    'legacy_structure_contract',
+                    "legacy template structure detected; run "
+                    "skills/ppt-master/workflows/restore-pptx-structure.md before "
+                    "Step 3 consumption",
+                ))
         spec_pages = self._extract_spec_roster(spec_text) if spec_text else []
         custom_contract = self._extract_frontmatter_placeholders(spec_text) if spec_text else {}
 
@@ -2120,9 +4361,9 @@ class SVGQualityChecker:
                 ))
         elif spec_path.exists():
             # design_spec.md is present but the roster parser found nothing —
-            # surface as a warning. Legacy specs may lack an explicit roster.
+            # reusable template workspaces always fail closed.
             self._template_issues.append((
-                'warning',
+                'error',
                 'roster_unknown',
                 f"could not extract page roster from {spec_path.name}; "
                 "skipping orphan/missing checks",
@@ -2401,8 +4642,13 @@ class SVGQualityChecker:
             print(f"\n[TIP] Common fixes:")
             print(f"  1. XML well-formedness: write typography as raw Unicode (—, ©, →, NBSP); escape XML reserved chars as &amp; &lt; &gt; &quot; &apos; — never use HTML named entities like &nbsp; &mdash; &copy;")
             print(f"  2. viewBox issues: root viewBox is the canvas authority (see references/canvas-formats.md)")
-            print(f"  3. foreignObject: Use <text> + <tspan> for manual line breaks")
-            print(f"  4. Font issues: use PPT-safe exported typefaces (e.g. Microsoft YaHei / Arial / Consolas)")
+            print(
+                "  3. Paint recommendation: generated SVG prefers uppercase "
+                "#RRGGBB plus channel-specific opacity; compatible alternatives "
+                "remain non-blocking"
+            )
+            print(f"  4. foreignObject: Use <text> + <tspan> for manual line breaks")
+            print(f"  5. Font issues: use PPT-safe exported typefaces (e.g. Microsoft YaHei / Arial / Consolas)")
 
     def _print_animation_summary(self):
         """Print animations.json validation issues if present."""
@@ -2467,8 +4713,10 @@ class SVGQualityChecker:
             for _sev, kind, msg in warnings:
                 print(f"    [{kind}] {msg}")
         if not errors:
-            print("  No structural roster issues. Placeholder hints above are advisory only;")
-            print("  declare 'placeholders:' frontmatter in design_spec.md to silence them.")
+            print("  No structural roster issues.")
+            print("  Conventional placeholder-name hints may be declared through "
+                  "'placeholders:' frontmatter. Placeholder bounds are mandatory "
+                  "design-zone metadata.")
 
     def _apply_aggregated_issue_counts(self):
         """Mirror project-level aggregate issues into summary counters once."""
@@ -2589,20 +4837,25 @@ def print_usage() -> None:
     print("Usage:")
     print("  python3 scripts/svg_quality_checker.py <svg_file>")
     print("  python3 scripts/svg_quality_checker.py <directory>")
-    print("  python3 scripts/svg_quality_checker.py <template_dir> --template-mode")
+    print("  python3 scripts/svg_quality_checker.py <workspace>/templates --template-mode")
     print("  python3 scripts/svg_quality_checker.py --all examples")
     print("\nExamples:")
     print("  python3 scripts/svg_quality_checker.py examples/project/svg_output/slide_01.svg")
     print("  python3 scripts/svg_quality_checker.py examples/project/svg_output")
     print("  python3 scripts/svg_quality_checker.py examples/project")
-    print("  python3 scripts/svg_quality_checker.py templates/layouts/academic_defense --template-mode")
-    print("  python3 scripts/svg_quality_checker.py templates/decks/招商银行 --template-mode")
+    print("  python3 scripts/svg_quality_checker.py templates/layouts/presentation_core/templates --template-mode")
+    print("  python3 scripts/svg_quality_checker.py templates/decks/中国电信/templates --template-mode")
     print("\nOptions:")
     print("  --format <ppt169|ppt43|...>   Expected canvas format")
-    print("  --template-mode               Validate a templates/{layouts,decks}/<id> directory:")
-    print("                                  glob *.svg directly, skip spec_lock checks,")
-    print("                                  enforce roster ↔ design_spec.md Page Roster consistency,")
-    print("                                  and emit advisory placeholder-convention warnings.")
+    print("  --template-mode               Validate a template workspace's templates/ directory:")
+    print("                                  glob *.svg directly and skip spec_lock checks;")
+    print("                                  always enforce roster consistency and emit placeholder hints.")
+    print("                                  native_structure_mode: structured also enables complete")
+    print("                                  per-file and cross-page structure validation. Legacy")
+    print("                                  native_structure_mode: template fails and must run")
+    print("                                  restore-pptx-structure before validation.")
+    print("  Warnings are advisory: they require no modification and do not affect exit status;")
+    print("  only errors make the command exit with status 1.")
 
 
 def main() -> None:

@@ -81,7 +81,7 @@
   <stop offset="100%" stop-color="#[secondary accent]"/>
 </linearGradient>
 
-<!-- Background decorative gradient (note: rgba forbidden, use stop-opacity) -->
+<!-- Background decorative gradient (explicit stop-opacity keeps the palette reusable) -->
 <radialGradient id="bgDecor" cx="80%" cy="20%" r="50%">
   <stop offset="0%" stop-color="#[primary]" stop-opacity="0.15"/>
   <stop offset="100%" stop-color="#[primary]" stop-opacity="0"/>
@@ -250,6 +250,8 @@ Catalog read: 76 templates
 
 > **Audit rule**: `Summary-quote` must be copy-pasted verbatim — paraphrasing breaks the audit. Every template name listed must `grep` cleanly inside `charts_index.json` (so misspellings/inventions fail). If fewer than 3 viz pages exist, list what exists and note "fewer than 3 viz pages"; runners-up still required for each page that does exist.
 
+> **Native-preset candidates → append to `Usage`**: for a page already in this list, when its content calls for a literal stock PowerPoint shape (chevron, block arrow, standard flowchart node, callout, banner, star — judged from the page plan, not a template's name), append a candidate note to that page's `Usage`, e.g. `…usage…; native-preset candidate: chevron; Executor applies executor-base §3.0`. The Executor still selects the exact preset, frame, and paint. See [`strategist.md`](../references/strategist.md) Template Match.
+
 ---
 
 ## VIII. Image Resource List (if needed)
@@ -306,6 +308,8 @@ Catalog read: 76 templates
 
 ## IX. Content Outline
 
+> **Native Layout boundary**: Each `Layout` line below always describes visual composition intent. On free-design and brand-only routes, it does not create native Master/Layout identity: `spec_lock.md` uses `pptx_structure.mode: flat`, omits `pptx_masters` / `pptx_layouts` / `page_pptx_layouts` / `page_layouts`, and every SVG object stays Slide-local. Export materializes one clean project-owned Master plus one Blank Layout from the current lock, removes stock content placeholders/Layout inventory, and retains only the standard date/footer/slide-number capability hooks. Deck/layout template routes use `mode: structured`: Strategist writes each unique Master/Layout definition once, assigns every page through `page_pptx_layouts`, and selects its authoring prototype through `page_layouts`. Strict preserves the prototype contract. Adaptive keeps its Master and may define and assign a new Layout key during page authoring only when fixed Layout atoms or slot topology/bounds change. Legacy prototypes first run [`restore-pptx-structure`](../workflows/restore-pptx-structure.md); no deferred distillation or immediate-compatibility fallback exists.
+
 ### Part 1: [Chapter Name]
 
 #### Slide 01 - Cover
@@ -349,25 +353,3 @@ One speaker note file per page, saved to `notes/`:
 
 - **Filename**: match SVG name (e.g., `01_cover.md`)
 - **Content**: script key points, timing cues, transition phrases
-
----
-
-## XI. Technical Constraints Reminder
-
-### SVG Generation Must Follow:
-
-1. viewBox: `{canvas_info['viewbox']}`
-2. Background uses `<rect>` elements
-3. Text wrapping uses `<tspan>` (`<foreignObject>` FORBIDDEN)
-4. Transparency uses `fill-opacity` / `stroke-opacity`; `rgba()` FORBIDDEN
-5. FORBIDDEN: `mask`, `<style>`, `class`, `foreignObject`
-6. FORBIDDEN: `textPath`, `animate*`, `script`
-7. Text characters: write typography & symbols as raw Unicode (em dash `—`, en dash `–`, `©`, `®`, `→`, NBSP, etc.); HTML named entities (`&nbsp;`, `&mdash;`, `&copy;`, `&reg;` …) are FORBIDDEN. XML reserved chars in text MUST be escaped as `&amp;` `&lt;` `&gt;` `&quot;` `&apos;` (e.g. `R&amp;D`, `error &lt; 5%`). See shared-standards.md §1.0
-7. `marker-start` / `marker-end` conditionally allowed: `<marker>` must be in `<defs>`, `orient="auto"`, shape must be triangle / diamond / circle (see shared-standards.md §1.1)
-8. `clipPath` conditionally allowed **only on `<image>` elements**: `<clipPath>` in `<defs>`, single shape child (circle / ellipse / rect with rx,ry / path / polygon). Do NOT apply to shapes / groups / text — draw the target geometry directly with the matching native element (`<circle>` / `<ellipse>` / `<rect rx>` / `<polygon>` / `<path>`). See shared-standards.md §1.2
-
-### PPT Compatibility Rules:
-
-- `<g opacity="...">` FORBIDDEN (group opacity); set on each child element individually
-- Image transparency uses overlay mask layer (`<rect fill="bg-color" opacity="0.x"/>`)
-- Inline styles only; external CSS and `@font-face` FORBIDDEN
