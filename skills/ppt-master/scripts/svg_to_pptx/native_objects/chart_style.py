@@ -6,8 +6,16 @@ import math
 from typing import Any
 from xml.etree import ElementTree as ET
 
+from .marker_attributes import native_import_source
+
 from ..drawingml.context import ConvertContext
-from ..drawingml.utils import detect_text_lang, parse_font_family, px_to_emu, _xml_escape
+from ..drawingml.utils import (
+    _xml_escape,
+    detect_text_lang,
+    parse_font_family,
+    px_to_emu,
+    quantize_ooxml_alpha,
+)
 from .chart_data import _DEFAULT_CHART_COLORS
 from .marker_common import (
     _bool_attr,
@@ -363,7 +371,7 @@ def _alpha_xml(value: Any, field_name: str = "fill_opacity") -> str:
         raise RuntimeError(f"Native PPTX chart {field_name} must be finite")
     if alpha < 0 or alpha > 1:
         raise RuntimeError(f"Native PPTX chart {field_name} must be between 0 and 1")
-    return f'<a:alpha val="{int(round(alpha * 100000))}"/>'
+    return f'<a:alpha val="{quantize_ooxml_alpha(alpha)}"/>'
 
 
 def _axis_title_xml(
@@ -472,7 +480,8 @@ def _native_chart_chrome_errors(elem: ET.Element, payload: dict[str, Any]) -> li
     suffix = "" if len(missing) <= 5 else f", and {len(missing) - 5} more"
     return [
         "Native PPTX chart metadata contains title/axis text that is not visible "
-        f"inside the fallback marker and would appear only after --native-objects: {sample}{suffix}. "
+        "inside the fallback marker and would appear only after "
+        f"--native-charts-and-tables: {sample}{suffix}. "
         "Use `name` for object naming, or draw the same text in the chart fallback."
     ]
 
@@ -481,7 +490,7 @@ def _native_chart_export_payload(
     elem: ET.Element,
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str]]:
-    if elem.get("data-pptx-native-source") == "pptx":
+    if native_import_source(elem) == "pptx":
         return payload, []
     fallback_texts = set(_visible_fallback_texts(elem))
     output = payload
@@ -619,7 +628,8 @@ def _native_chart_chrome_warnings(elem: ET.Element, payload: dict[str, Any]) -> 
         suffix = "" if len(missing_companion) <= 5 else f", and {len(missing_companion) - 5} more"
         warnings.append(
             "Native PPTX chart companion text is not visible inside the fallback "
-            f"marker and may appear only after --native-objects: {sample}{suffix}. "
+            "marker and may appear only after --native-charts-and-tables: "
+            f"{sample}{suffix}. "
             "Keep companion metadata aligned with visible chart annotations."
         )
     return warnings

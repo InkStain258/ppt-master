@@ -9,7 +9,7 @@ Placeholder syntax (new SVGs must include a library prefix):
     <use data-icon="tabler-filled/home" x="100" y="200" width="48" height="48" fill="#0076A8"/>
     <use data-icon="tabler-outline/home" x="100" y="200" width="48" height="48" fill="#0076A8"/>
     <use data-icon="tabler-outline/home" x="100" y="200" width="48" height="48" fill="#0076A8" stroke-width="3"/>
-    <use data-icon="layered_slide_06_ill01"/>
+    <use data-icon="imported/layered_slide_06_ill01"/>
 
 Legacy compatibility accepted by the resolver:
     <use data-icon="rocket" .../> -> chunk-filled/rocket
@@ -30,7 +30,7 @@ Icon libraries (subdirectories of templates/icons/):
     tabler-outline/    - 5000+ stroke icons, 24x24 viewBox (use prefix: tabler-outline/name)
     phosphor-duotone/  - 1200+ duotone icons, 256x256 viewBox (single color + 0.2-opacity backplate)
     simple-icons/      - 3400+ brand logos, 24x24 viewBox (brand-inset library — used alongside the chosen primary library, NOT as a standalone library for generic icons)
-    <asset_id>.svg     - project-local extracted vector illustrations with data-icon-style="preserve-color"; preserve source colors and natural viewBox aspect ratio
+    imported/          - project-local extracted vector illustrations with data-icon-style="preserve-color"; preserve source colors and natural viewBox aspect ratio
 
 Usage:
     python3 scripts/svg_finalize/embed_icons.py <svg_file> [svg_file2] ...
@@ -56,6 +56,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 from console_encoding import configure_utf8_stdio  # noqa: E402
+from svg_to_pptx.drawingml.utils import parse_project_geometry_length  # noqa: E402
 
 configure_utf8_stdio()
 
@@ -312,7 +313,7 @@ def parse_use_element(use_match: str) -> dict[str, str | float]:
     for attr in ['x', 'y', 'width', 'height']:
         value = _attr_value(use_match, attr)
         if value is not None:
-            attrs[attr] = float(value)
+            attrs[attr] = parse_project_geometry_length(value, attr)
 
     # Extract fill color
     fill_value = _attr_value(use_match, 'fill')

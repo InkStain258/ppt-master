@@ -21,7 +21,7 @@ description: >
 | Templates, `design_spec.md`, and `spec_lock.md` | Authoring/control inputs. They guide SVG creation but MUST NOT supply visible slide content that is absent from the completed SVG during export. |
 | Semantic SVG markers | Minimal rendering-neutral compiler hints used only after existing Layout/Layer/Placeholder/Native metadata has been considered. They never replace native SVG geometry, text, styles, grouping, or asset references. |
 | `svg_final/` | Mandatory derived, self-contained SVG visual preview. It may be opened directly or inserted into PowerPoint as an SVG picture, but it is not a supported PPTX source and carries no manual Convert-to-Shape compatibility contract. |
-| SVG-to-PPTX export | The only supported generated-PPTX route reads `svg_output/` and maps its content through the project converter to DrawingML/native objects. It may reorganize represented content into Master/Layout/Slide structure but MUST NOT invent new visible page content. |
+| SVG-to-PPTX export | The only supported generated-PPTX route reads `svg_output/` and maps its content through the project converter to DrawingML/native objects. It compiles only the selected route's explicit structure contract: `flat` keeps represented content Slide-local, while `structured` may place explicitly scoped content in Master/Layout/Slide parts. It MUST NOT infer structure, upgrade `flat`, or invent new visible page content. |
 | Direct PPTX and presentation-behavior workflows | Remain separate. `template-fill-pptx`, `native-enhance-pptx`, animations, transitions, speaker notes, narration, and package relationships are not required to round-trip through SVG. |
 
 **MUST — page-design closure**: For an SVG-authoring route, inspect the final page SVG to determine what the exported slide looks like. Do not reinterpret “SVG is the page-design language” as “SVG is the complete PPTX package description language.”
@@ -90,14 +90,13 @@ description: >
 | `${SKILL_DIR}/scripts/latex_render.py` | LaTeX formula rendering (manifest-driven PNG assets) |
 | `${SKILL_DIR}/scripts/image_gen.py` | AI image generation (multi-provider) |
 | `${SKILL_DIR}/scripts/slice_images.py` | Slice one AI illustration sheet into individual spot-illustration elements |
-| `${SKILL_DIR}/scripts/svg_authoring_view.py` | Create a lightweight non-destructive inspection projection of PPTX-imported SVGs; never a release source |
+| `${SKILL_DIR}/scripts/svg_authoring_view.py` | Create a lightweight editable authoring IR bundle and compact provenance manifest from PPTX-imported SVGs |
 | `${SKILL_DIR}/scripts/svg_quality_checker.py` | SVG quality check |
-| `${SKILL_DIR}/scripts/preset_shape_svg.py` | Print one registry-backed native PowerPoint preset fragment to stdout for hand-authored SVG insertion |
+| `${SKILL_DIR}/scripts/preset_shape_svg.py` | Print one compact registry-backed native PowerPoint preset `<g>` to stdout for page or template insertion |
 | `${SKILL_DIR}/scripts/total_md_split.py` | Speaker notes splitting |
 | `${SKILL_DIR}/scripts/finalize_svg.py` | SVG post-processing (unified entry) |
 | `${SKILL_DIR}/scripts/svg_to_pptx.py` | Export to PPTX |
 | `${SKILL_DIR}/scripts/native_enhance_pptx.py` | Existing PPTX enhancement project init / validation / direct OOXML patch export |
-| `${SKILL_DIR}/scripts/native_narration_pptx.py` | Backward-compatible entrypoint for existing PPTX notes / narration enhancement |
 | `${SKILL_DIR}/scripts/update_spec.py` | Propagate a `spec_lock.md` color / font_family change across all generated SVGs |
 
 For complete tool documentation, see `${SKILL_DIR}/scripts/README.md`.
@@ -140,12 +139,16 @@ Master/Layout topology is neither preserved nor distilled. `mirror` is a
 restoration path: preserve the source slide roster/order, visual appearance,
 Master/Layout parentage and identities, placeholder type/index/bounds, native
 object ownership, and supported native-shape metadata. The lossless import is
-the restoration authority; the lightweight authoring projection exists only to
-keep model context small. Mechanical normalization may express the source facts
-in the current explicit SVG contract and expand fixed-layer group wrappers into
-direct atoms, but it MUST NOT merge, split, promote, demote, rename, or
-re-parent source structure. Export compiles the selected contract and never
-infers a different one. Mirror emits one complete page prototype per source
+the native-payload backing store; the `authoring-svg/` bundle and its
+`authoring_manifest.json` are the only editable template-creation IR. Stable
+document-local source references let mirror materialization reuse unchanged
+native payload without putting it in model context. Mechanical normalization
+may express the source facts in the current explicit SVG contract and expand
+fixed-layer group wrappers into direct atoms, but it MUST NOT merge, split,
+promote, demote, rename, or re-parent source structure. The IR is materialized
+into validated `templates/*.svg` before export; it is not itself a release SVG
+directory. Export compiles the selected contract and never infers a different
+one. Mirror emits one complete page prototype per source
 Slide plus one definition-only `layout_<layout_key>.svg` prototype for every
 source Layout unused by those Slides. The independent Master/Layout roster then
 registers the complete supported source graph without publishing synthetic
@@ -300,7 +303,7 @@ Normalize every explicit path before any write:
 
 Never infer that a flat directory has legacy Master/Layout semantics solely from packaging.
 
-The same current-workspace routing applies to all three kinds: source/spec in `templates/`, visual assets in `images/`, runtime icons in `icons/`, and on-demand review artifacts in `exports/`. Empty optional roots are omitted rather than retained with placeholder files, so a normal workspace has no `exports/` until a review file is explicitly generated. The spec's `kind` tells Strategist how to read the installed source. Template SVGs are not export-time overlays: visible output still lives completely in `svg_output/`. Their complete visuals and explicit Master/Layout/placeholder metadata are nevertheless the authoring prototypes selected by `page_layouts`.
+The same current-workspace routing applies to all three kinds: source/spec in `templates/`, visual assets in `images/`, imported vectors once in `icons/imported/`, other explicitly adopted icon-library namespaces under `icons/`, and on-demand review artifacts in `exports/`. Empty optional roots are omitted rather than retained with placeholder files, so a normal workspace has no `exports/` until a review file is explicitly generated. The spec's `kind` tells Strategist how to read the installed source. Template SVGs are not export-time overlays: visible output still lives completely in `svg_output/`. Their complete visuals and explicit Master/Layout/placeholder metadata are nevertheless the authoring prototypes selected by `page_layouts`.
 
 When `create-template` used project output scope, its workspace root is the target project itself and all core directories are already final. Resolve both roots before copying: equality means **in-place consumption**, so skip the installation. An in-place workspace cannot participate in multi-path fusion; use external workspaces for fusion. Never place the local source under a nested `templates/local_master/` directory because the confirmation and quality gates read the project `templates/` root.
 
@@ -633,13 +636,13 @@ python3 ${SKILL_DIR}/scripts/svg_editor/server.py <project_path> --live --daemon
 
 **Visual Construction Phase**: generate SVG pages sequentially, one at a time, in one continuous pass → `<project_path>/svg_output/`
 
-Each completed SVG MUST be a standalone, complete representation of that slide's visible design. Template SVGs and locked planning artifacts may guide construction, but export must not reach back to them to add visible objects omitted from `svg_output/`. Speaker notes, animation, narration, transitions, and direct native-PPTX workflows remain separately owned artifacts/capabilities. Before drawing a literal stock shape, apply [`native-shape-authoring.md`](references/native-shape-authoring.md): use the stdout-only helper when one PowerPoint preset exactly matches, keep basic SVG primitives for rect/round-rect/ellipse, and keep free SVG for custom semantics. Never infer a preset from contour similarity.
+Each completed SVG MUST be a standalone, complete representation of that slide's visible design. Template SVGs and locked planning artifacts may guide construction, but export must not reach back to them to add visible objects omitted from `svg_output/`. Speaker notes, animation, narration, transitions, and direct native-PPTX workflows remain separately owned artifacts/capabilities. Before drawing a literal stock shape, apply [`native-shape-authoring.md`](references/native-shape-authoring.md): use the stdout-only helper when one PowerPoint preset exactly matches, keep basic SVG primitives for rect/round-rect/ellipse, and keep free SVG for custom semantics. Diagram relationships are Shape-first: use ordinary line/path shapes with registered arrow markers for thin edges and ordinary shape presets for solid block arrows; do not default to connector-family presets or author attachment metadata. Never infer a preset from contour similarity.
 
 Template pages MUST start from the complete `page_layouts` SVG, keep all inherited visible objects in `svg_output/`, and preserve the locked root Master/Layout identity plus stable atomic Master/Layout and slot ids. Strict keeps the prototype structure unchanged. Adaptive keeps its Master contract and, when Layout atoms or slot topology/bounds genuinely evolve, assigns a new key/name and updates `spec_lock.md` immediately. Non-mirror fill/stroke/effects/font sizes still follow `spec_lock`.
 
 Free-design and brand-only pages use `pptx_structure.mode: flat`. Draw the complete page directly: keep backgrounds, repeated chrome, headings, text, images, and decoration as ordinary Slide-local SVG content. Do not plan `pptx_masters` / `pptx_layouts` / `page_pptx_layouts`, do not add root Master/Layout identity, and do not add `data-pptx-layer` or `data-pptx-placeholder` metadata. Group logical content normally with top-level `<g id>` elements. Export materializes one clean project-owned Master plus one Blank Layout, applies the locked theme colors/fonts/title-body defaults, removes stock content placeholders and unused built-in Layouts, and retains only the standard date/footer/slide-number capability hooks. It does not promote or deduplicate page content.
 
-Do not duplicate specialized identity with `data-pptx-role`. Add it only to structural page-frame objects whose package, page-number, or animation behavior is not already expressed by `data-pptx-layer`, `data-pptx-placeholder`, or `data-pptx-native`; such an element needs a stable unique `id`. Do not add generic content roles to ordinary titles, body text, cards, KPIs, diagrams, charts, icons, or images. Full contract: [`references/semantic-svg.md`](references/semantic-svg.md).
+Do not duplicate specialized identity with `data-pptx-role`. Add it only to structural page-frame objects whose package, page-number, or animation behavior is not already expressed by `data-pptx-layer`, `data-pptx-placeholder`, or `data-pptx-replace-with`; such an element needs a stable unique `id`. Do not add generic content roles to ordinary titles, body text, cards, KPIs, diagrams, charts, icons, or images. Full contract: [`references/semantic-svg.md`](references/semantic-svg.md).
 
 **First-page gate (Mandatory)** — after the **first** SVG page, before drawing page 2:
 ```bash
@@ -709,8 +712,8 @@ python3 ${SKILL_DIR}/scripts/svg_to_pptx.py <project_path>
 # Output (default-flow mode):
 #   exports/<project_name>_<timestamp>.pptx           ← native pptx (canonical output, reads svg_output/)
 #   backup/<timestamp>/svg_output/                    ← Executor SVG source backup (always written)
-# Add --native-objects to emit real editable chart/table objects instead of flattened shapes:
-#   exports/<project_name>_<timestamp>_native_charts.pptx  ← native chart/table objects (data-pptx-native markers)
+# Add --native-charts-and-tables to replace marked fallbacks with PowerPoint-native Chart/Table objects:
+#   exports/<project_name>_<timestamp>_native_charts_tables.pptx  ← native Chart/Table replacements (data-pptx-replace-with markers)
 # Re-export with --recorded-narration audio (generate-audio workflow) embeds per-slide narration:
 #   exports/<project_name>_<timestamp>_narrated.pptx  ← narrated pptx (embedded audio + auto-advance timings)
 ```
@@ -804,45 +807,56 @@ python3 ${SKILL_DIR}/scripts/svg_to_pptx.py <project_path>
 > it with `--no-merge`. Strict-line text stays Slide-local rather than claiming
 > one PowerPoint placeholder.
 
-> **Native table/chart objects** — supported data charts and pure text-grid
-> tables carry `data-pptx-native` markers by default (Executor transcribes
+> **PowerPoint-native Chart/Table replacements** — supported data charts and pure text-grid
+> tables carry `data-pptx-replace-with` markers by default (Executor transcribes
 > them at draw time; see `references/executor-base.md` §3.2) and the markers
 > stay dormant.
-> Add `--native-objects` only when the user explicitly wants
-> PowerPoint-editable native tables/charts and accepts that those objects may
+> Add `--native-charts-and-tables` only when the user explicitly wants
+> data-backed PowerPoint-native Chart/Table objects and their object-specific
+> editing controls, and accepts that those objects may
 > render differently across PowerPoint / Keynote / LibreOffice / WPS; marker-local
-> details not represented by native metadata may be omitted. This is a lossy
-> editable-first contract, not a reason to disable an otherwise supported marker. Without
-> the flag, marked groups export through their SVG fallback children like
-> ordinary SVG content. Imported objects that carry
-> `data-pptx-native-status` are fallback-only; the quality checker and
-> `--native-objects` export surface their reason as warnings rather than silently
-> claiming editability. An imported chart with no baked preview is a different
-> case: `data-pptx-visual-status="placeholder"` plus
-> `data-pptx-route-status="reconstruction-only"` records a diagnostic route.
+> details not represented by the replacement payload may be omitted. This is a lossy
+> data-object-first contract, not a reason to disable an otherwise supported
+> marker. Without the flag, marked groups export through their SVG fallback
+> children as independently editable DrawingML shapes. Imported objects that carry
+> `data-pptx-replacement-status` are fallback-only; the quality checker and
+> `--native-charts-and-tables` export surface their reason as warnings rather than silently
+> claiming a native data object. An imported chart with no baked preview is a different
+> case: `data-pptx-fallback-kind="placeholder"` records its
+> reconstruction-only fallback.
 > Default export keeps that placeholder with a warning; when the same group has
-> a valid active `data-pptx-native="chart"` payload, `--native-objects` may still
-> reconstruct the editable chart. Invalid or contradictory status declarations
+> a valid active `data-pptx-replace-with="chart"` payload,
+> `--native-charts-and-tables` may still
+> reconstruct the PowerPoint-native chart. Invalid or contradictory status declarations
 > remain export errors. For supported parsed classic families, the importer
 > instead emits a deterministic visible fallback with
-> `data-pptx-visual-status="normalized"`; this is readable reconstruction, not
+> `data-pptx-fallback-kind="normalized"`; this is readable reconstruction, not
 > a claim of Office pixel parity. Active imported table/chart markers also carry
+> `data-pptx-import-source="pptx"` and
 > `data-pptx-fallback-sha256`. If their fallback, reachable SVG fragment
 > definition, local reference target, or marker transform changes later, default
 > export keeps that SVG, the mandatory quality checker warns, and
-> `--native-objects` fails rather than discard the edit. Legacy markers
-> without a baseline remain native-compatible and only warn that stale detection
-> is unavailable.
+> `--native-charts-and-tables` fails rather than discard the edit. Generated
+> authoring and reusable templates omit import provenance and a static baseline;
+> that hashless authored state is normal and does not warn. Hashless legacy
+> imported markers that still carry PPTX import provenance remain
+> native-compatible and only warn that stale detection is unavailable. Legacy
+> `data-pptx-native*`, `data-pptx-visual-status`, and
+> `data-pptx-route-status` spellings remain read-compatible; generated SVG uses
+> only the canonical replacement/fallback attributes. `--native-objects`
+> remains a compatibility alias for `--native-charts-and-tables`.
 > Imported table markers may also cover the verified narrow P2 subset:
 > exact physical row/grid topology, canonical rectangular merges with blank
 > covered cells, safe per-side borders, plain multi-paragraph cells, and closed
 > run-level rich text. A rich paragraph contains non-empty `runs`; each run
 > requires `text` and may use only
 > `bold` / `italic` / `underline` / `strike` / `color` / `font_size` /
-> `font_family` / `lang` / `alt_lang`. Presentation-only source run XML
-> normalizes, while relationship-bearing text, extensions, line breaks, fields,
-> tabs, bullets, broken text topology, noncanonical merges, and unsafe direct
-> formatting remain fallback-only. Imported classic charts
+> `font_family` / `lang` / `alt_lang`. Presentation-only source run XML without
+> a non-empty `effectLst` / `effectDag` normalizes; a table-cell run effect
+> disables native replacement and adds a blocking effect diagnostic.
+> Relationship-bearing text, extensions, line breaks, fields, tabs, bullets,
+> broken text topology, noncanonical merges, and unsafe direct formatting
+> remain fallback-only. Imported classic charts
 > additionally cover verified column/line/area combos, canonical OHLC stock,
 > area date-axis cases, verified scatter/bubble axes, radar, safe `of_pie`
 > `serLines`, and the closed axis/title/legend plus bar-gap/overlap normalization
