@@ -1,8 +1,8 @@
 # Page Transitions & Per-Element Animations
 
-PPT Master's exported PPTX supports **page transitions** and **per-element
-entrance animations** as real PowerPoint OOXML. Other applications may
-interpret timing differently; this contract makes no unconditional Keynote guarantee.
+Execution contract for generated-PPTX **page transitions** and **per-element
+entrance animations**. This file owns defaults, sidecar semantics, anchor
+selection, validation, and package read-back.
 
 ## 1. Defaults
 
@@ -19,7 +19,7 @@ To regenerate a deck with different settings, rerun `svg_to_pptx.py` against the
 
 Per-element animation is off by default. To enable it deck-wide, pass `-a auto` at export (no config needed). When a deck instead needs specific object timing — for example title first, chart second, annotation last — use the optional `animations.json` sidecar. The SVG remains static visual source; the sidecar only controls PPTX export behavior.
 
-Run the standalone [`customize-animations`](../workflows/customize-animations.md) workflow when the user asks to tune animation order, effects, timing, or object-level reveals.
+Run the [`customize-animations`](../workflows/stages/customize-animations.md) post-processing stage when the user asks to tune animation order, effects, timing, or object-level reveals.
 
 ```bash
 # Build an editable scaffold from real top-level <g id> anchors
@@ -66,6 +66,12 @@ Rules:
 - `--animation none` overrides the sidecar and disables all per-element animation.
 - An explicit sidecar group may override the legacy chrome-name heuristic, but it cannot override `data-pptx-layer` or an explicit static role/placeholder marker.
 - Unknown effects, modes, or triggers and invalid numeric/order fields fail validation; no fallback effect is substituted.
+
+**Declared inheritance for omitted sidecar fields**:
+
+- The whole `animations.json` artifact is optional. When absent, normal exporter CLI resolution applies.
+- In any existing sparse sidecar, an omitted slide transition/animation property inherits the matching `defaults.transition` / `defaults.animation` property; when that defaults property is also absent, normal exporter CLI resolution applies. Explicit CLI overrides still win. Current authoring writes each slide's complete transition and animation blocks.
+- A group override inherits `effect` and `duration` from its resolved slide animation; omitted `order` and `delay` use the exporter's sidecar resolution.
 
 ---
 
@@ -161,7 +167,7 @@ Aim for **3–8 content groups per slide**. This is also the granularity PowerPo
 - ≤ 8 visible top-level primitives → each becomes one anchor (capped to avoid 70+ atom cascades on dense pages).
 - > 8 → animation is skipped on that slide. The slide still renders, just without entrance animation.
 
-Executors should wrap logical sections in `<g id>` regardless of whether you plan to animate. The Executor reference (`skills/ppt-master/references/shared-standards.md`) requires it.
+Executors should wrap logical sections in `<g id>` regardless of whether you plan to animate. [`shared-standards-core.md`](./shared-standards-core.md) requires it.
 
 ---
 

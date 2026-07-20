@@ -9,9 +9,9 @@ clickable page (color swatches, live font previews, candidate picks). On
 submit it writes the user's final choices to
 ``<project>/confirm_ui/result.json`` for the AI to read back.
 
-This is the confirmation surface only. The chat fallback always remains valid:
-if the browser cannot open (remote / headless / web host), the AI presents the
-same Strategist confirmation stage in chat.
+This is the default confirmation surface. The chat fallback is used only when
+the user explicitly requests chat-only confirmation or the browser launch
+fails; it preserves the same staged semantics.
 
 See scripts/docs/confirm_ui.md for the round-trip data contract and schema.
 
@@ -80,6 +80,17 @@ RECOMMENDATIONS_NAME = 'recommendations.json'
 RESULT_NAME = 'result.json'
 SESSION_NAME = 'session.json'
 
+_PALETTE_ROLES = (
+    'background',
+    'secondary_bg',
+    'primary',
+    'accent',
+    'secondary_accent',
+    'body_text',
+)
+_TYPOGRAPHY_SIZE_ROLES = ('title', 'subtitle', 'annotation')
+_HEX_COLOR_RE = re.compile(r'#?(?:[0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})\Z')
+
 # Static option universe served at /api/catalogs (canvas synced live from config).
 _CATALOGS_PATH = Path(__file__).resolve().parent / 'static' / 'catalogs.json'
 _ICON_LIBRARY_DIR = Path(__file__).resolve().parents[2] / 'templates' / 'icons'
@@ -105,7 +116,6 @@ STARTUP_TIMEOUT = 10
 # slow user can still confirm after the wait returns; the caller re-checks
 # result.json before falling back to chat.
 WAIT_TIMEOUT_DEFAULT = 590
-
 
 def _read_json_object(path: Path, retries: int = 2, delay: float = 0.08) -> dict:
     """Read a JSON object, retrying briefly around non-atomic external writes."""
@@ -261,6 +271,15 @@ def _wait_for_result(
         if result_file.exists():
             try:
                 if result_file.stat().st_mtime >= started_at:
+                    actual_stage = _result_stage(result_file)
+                    expected_stage = _expected_result_stage(result_file.parent)
+                    if actual_stage != expected_stage:
+                        logger.error(
+                            'confirmation stage mismatch: expected %s, found %s',
+                            expected_stage,
+                            actual_stage or 'invalid/absent',
+                        )
+                        return 2
                     logger.info('confirmation received: %s', result_file)
                     try:
                         proc.wait(timeout=3)
@@ -384,9 +403,358 @@ def _stage_skip_error(confirm_dir: Path) -> Optional[str]:
     return (
         f'stage skip detected: recommendations.json is {_stage_name(rec_stage_number)} but the last '
         f'confirmed result is {result_stage or "absent"} — the page will not render a skipped stage. '
-        f'Stages confirm in order and an active template does not exempt stage2 (SKILL.md Step 4). '
+        f'Stages confirm in order and an active template does not exempt stage2 (generate-pptx Step 4). '
         f'Overwrite recommendations.json with the {expected} recommendations, then re-run with {reattach}.'
     )
+
+
+def _template_confirmation_required(project_path: Path, recommendations: dict) -> bool:
+    """Return whether this project must use the staged template confirmation."""
+    return (
+        'template_application' in recommendations
+        or (project_path / 'templates' / 'design_spec.md').is_file()
+    )
+
+
+def _template_stage2_error(
+    recommendations: dict,
+    *,
+    template_required: bool,
+) -> Optional[str]:
+    """Require the natural-language template plan in template Stage 2."""
+    if template_required and 'template_application' not in recommendations:
+        return (
+            'template Stage 2 recommendations must include '
+            'template_application.value'
+        )
+    return None
+
+
+def _localized_text_present(candidate: dict, field: str) -> bool:
+    """Return whether a candidate carries non-empty localized prose."""
+    return any(
+        isinstance(candidate.get(key), str) and bool(candidate[key].strip())
+        for key in (field, f'{field}_zh', f'{field}_en', f'{field}_ja')
+    )
+
+
+def _recommended_image_usage(recommendations: dict):
+    """Return the Stage 2 image-source recommendation in either schema."""
+    recommend = recommendations.get('recommend')
+    usage = recommend.get('image_usage') if isinstance(recommend, dict) else None
+    if usage is None:
+        usage = recommendations.get('image_usage')
+        if isinstance(usage, dict):
+            usage = usage.get('value')
+    return usage
+
+
+def _uses_ai_images(recommendations: dict) -> bool:
+    """Return whether Stage 2 proposes AI-generated images."""
+    usage = _recommended_image_usage(recommendations)
+    return 'ai' in usage if isinstance(usage, list) else usage == 'ai'
+
+
+def _palette_error(color: object, label: str) -> Optional[str]:
+    """Validate one complete user-facing palette."""
+    if not isinstance(color, dict):
+        return f'{label} must be an object'
+    palette = color.get('palette')
+    if not isinstance(palette, dict):
+        palette = color
+    for role in _PALETTE_ROLES:
+        value = palette.get(role)
+        if role == 'body_text' and value is None:
+            value = palette.get('text')
+        if not isinstance(value, str) or not _HEX_COLOR_RE.fullmatch(value.strip()):
+            return f'{label}.palette.{role} must be a HEX color'
+    return None
+
+
+def _positive_number(value: object) -> bool:
+    """Return whether a JSON value is a positive finite number."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return False
+    return number > 0 and number != float('inf')
+
+
+def _typography_error(typography: object, label: str, *, require_sizes: bool) -> Optional[str]:
+    """Validate one complete user-facing typography recommendation or choice."""
+    if not isinstance(typography, dict):
+        return f'{label} must be an object'
+    for role in ('heading', 'body'):
+        font = typography.get(role)
+        if not isinstance(font, dict):
+            return f'{label}.{role} must be an object'
+        for field in ('cjk', 'latin', 'css'):
+            if not isinstance(font.get(field), str) or not font[field].strip():
+                return f'{label}.{role}.{field} must be non-empty'
+    if not _positive_number(typography.get('body_size')):
+        return f'{label}.body_size must be a positive number'
+    if not require_sizes:
+        return None
+    sizes = typography.get('sizes')
+    if not isinstance(sizes, dict):
+        return f'{label}.sizes must be an object'
+    for role in _TYPOGRAPHY_SIZE_ROLES:
+        if not _positive_number(sizes.get(role)):
+            return f'{label}.sizes.{role} must be a positive number'
+    return None
+
+
+def _candidate_list(spec: object) -> list:
+    """Return candidates from the current or legacy recommendation shape."""
+    if not isinstance(spec, dict):
+        return []
+    candidates = spec.get('candidates')
+    if not isinstance(candidates, list):
+        candidates = spec.get('options')
+    return candidates if isinstance(candidates, list) else []
+
+
+def _stage2_design_directions_error(recommendations: dict) -> Optional[str]:
+    """Require three complete coordinated Stage 2 design systems."""
+    directions = recommendations.get('design_directions')
+    if isinstance(directions, dict):
+        candidates = _candidate_list(directions)
+        if len(candidates) < 3:
+            return 'Stage 2 design_directions must include at least 3 candidates'
+        for index, candidate in enumerate(candidates, start=1):
+            label = f'design_directions.candidates[{index - 1}]'
+            if not isinstance(candidate, dict):
+                return f'{label} must be an object'
+            if not _localized_text_present(candidate, 'name'):
+                return f'{label} requires a non-empty localized name'
+            for field in ('visual_style', 'icons'):
+                if not isinstance(candidate.get(field), str) or not candidate[field].strip():
+                    return f'{label}.{field} must be non-empty'
+            error = _palette_error(candidate.get('color'), f'{label}.color')
+            if error:
+                return error
+            error = _typography_error(
+                candidate.get('typography'),
+                f'{label}.typography',
+                require_sizes=False,
+            )
+            if error:
+                return error
+            if _uses_ai_images(recommendations):
+                image_strategy = candidate.get('image_strategy')
+                if not isinstance(image_strategy, dict) or not str(
+                    image_strategy.get('rendering') or ''
+                ).strip():
+                    return f'{label}.image_strategy.rendering must be non-empty'
+        return None
+
+    # Legacy staged files remain readable, but they must still provide three
+    # complete color combinations and at least one complete typography choice.
+    colors = _candidate_list(recommendations.get('color'))
+    if len(colors) < 3:
+        return 'Stage 2 recommendations must include 3 complete color candidates'
+    for index, color in enumerate(colors):
+        error = _palette_error(color, f'color.candidates[{index}]')
+        if error:
+            return error
+    typography = _candidate_list(recommendations.get('typography'))
+    if not typography:
+        return 'Stage 2 recommendations must include typography candidates'
+    for index, candidate in enumerate(typography):
+        error = _typography_error(
+            candidate,
+            f'typography.candidates[{index}]',
+            require_sizes=False,
+        )
+        if error:
+            return error
+    return None
+
+
+def _stage2_custom_candidates_error(recommendations: dict) -> Optional[str]:
+    """Require visible AI-authored custom alternatives in new Stage 2 files."""
+    candidates = recommendations.get('custom_candidates')
+    if not isinstance(candidates, dict):
+        return 'Stage 2 recommendations must include custom_candidates'
+
+    for field in ('mode', 'visual_style'):
+        candidate = candidates.get(field)
+        if not isinstance(candidate, dict):
+            return f'custom_candidates.{field} must be an object'
+        for prose_field in ('name', 'behavior'):
+            if not _localized_text_present(candidate, prose_field):
+                return (
+                    f'custom_candidates.{field} requires non-empty localized '
+                    f'{prose_field}'
+                )
+
+    if not _uses_ai_images(recommendations):
+        return None
+
+    image_candidate = candidates.get('image_strategy')
+    if not isinstance(image_candidate, dict):
+        return 'custom_candidates.image_strategy must be an object when image_usage includes ai'
+    if image_candidate.get('rendering') != 'custom':
+        return 'custom_candidates.image_strategy.rendering must be custom'
+    for prose_field in ('name', 'visual', 'mood', 'behavior'):
+        if not _localized_text_present(image_candidate, prose_field):
+            return (
+                'custom_candidates.image_strategy requires non-empty localized '
+                f'{prose_field}'
+            )
+    return None
+
+
+def _submission_stage_error(
+    project_path: Path,
+    confirm_dir: Path,
+    submitted_stage: Optional[str],
+) -> Optional[str]:
+    """Reject a confirmation that does not match the staged recommendation."""
+    try:
+        recommendations = _read_json_object(confirm_dir / RECOMMENDATIONS_NAME)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        return f'cannot confirm without valid recommendations.json: {exc}'
+
+    rec_stage_number = _recommendation_stage(recommendations)
+    template_required = _template_confirmation_required(
+        project_path,
+        recommendations,
+    )
+    if rec_stage_number == 0:
+        if template_required:
+            return (
+                'an installed template requires the Stage 1 → Stage 2 → Stage 3 '
+                'flow; legacy single-pass confirmation is not allowed'
+            )
+        if submitted_stage not in {None, 'stage3', 'final'}:
+            return 'legacy single-pass recommendations accept only a final submission'
+        return None
+
+    if rec_stage_number == 2:
+        recommendation_error = _template_stage2_error(
+            recommendations,
+            template_required=template_required,
+        )
+        if recommendation_error:
+            return recommendation_error
+        recommendation_error = _stage2_custom_candidates_error(recommendations)
+        if recommendation_error:
+            return recommendation_error
+        recommendation_error = _stage2_design_directions_error(recommendations)
+        if recommendation_error:
+            return recommendation_error
+
+    allowed_submissions = {
+        1: {'stage1'},
+        2: {'stage2'},
+        3: {'stage3', 'final'},
+    }
+    if submitted_stage not in allowed_submissions[rec_stage_number]:
+        expected = 'final' if rec_stage_number == 3 else _stage_name(rec_stage_number)
+        return (
+            f'confirmation stage mismatch: recommendations.json is '
+            f'{_stage_name(rec_stage_number)}, so the submitted stage must be '
+            f'{expected}'
+        )
+
+    previous_stage = _result_stage(confirm_dir / RESULT_NAME)
+    allowed_predecessors = {
+        1: {None, 'stage1', 'stage2', 'final'},
+        2: {'stage1', 'stage2'},
+        3: {'stage2', 'final'},
+    }
+    if previous_stage not in allowed_predecessors[rec_stage_number]:
+        expected_previous = 'stage1' if rec_stage_number == 2 else 'stage2'
+        return (
+            f'confirmation predecessor mismatch: {_stage_name(rec_stage_number)} '
+            f'requires a confirmed {expected_previous} result, found '
+            f'{previous_stage or "absent"}'
+        )
+    return None
+
+
+def _custom_selection_error(result: dict) -> Optional[str]:
+    """Require behavior prose whenever a creative custom choice is selected."""
+    if result.get('mode') == 'custom' and not str(
+        result.get('mode_behavior') or ''
+    ).strip():
+        return 'mode=custom requires non-empty mode_behavior'
+    if result.get('visual_style') == 'custom' and not str(
+        result.get('visual_style_behavior') or ''
+    ).strip():
+        return 'visual_style=custom requires non-empty visual_style_behavior'
+    image_strategy = result.get('image_strategy')
+    if isinstance(image_strategy, dict) and image_strategy.get('rendering') == 'custom':
+        behavior = image_strategy.get('behavior') or image_strategy.get('custom')
+        if not str(behavior or '').strip():
+            return 'image_strategy.rendering=custom requires non-empty behavior'
+    return None
+
+
+def _stage2_solution_error(result: dict) -> Optional[str]:
+    """Reject a Stage 2/final payload with an incomplete design system."""
+    color = result.get('color')
+    color_error = _palette_error(color, 'color')
+    color_custom = (
+        isinstance(color, dict)
+        and color.get('name') == 'custom'
+        and str(color.get('custom') or '').strip()
+    )
+    if color_error and not color_custom:
+        return color_error
+
+    typography = result.get('typography')
+    typography_error = _typography_error(
+        typography,
+        'typography',
+        require_sizes=True,
+    )
+    typography_custom = (
+        isinstance(typography, dict)
+        and typography.get('name') == 'custom'
+        and str(typography.get('custom') or '').strip()
+        and _positive_number(typography.get('body_size'))
+        and isinstance(typography.get('sizes'), dict)
+        and all(
+            _positive_number(typography['sizes'].get(role))
+            for role in _TYPOGRAPHY_SIZE_ROLES
+        )
+    )
+    if typography_error and not typography_custom:
+        return typography_error
+    return None
+
+
+def _normalize_custom_selections(result: dict) -> None:
+    """Keep custom prose only for the creative choices actually selected."""
+    if result.get('mode') != 'custom':
+        result.pop('mode_behavior', None)
+    if result.get('visual_style') != 'custom':
+        result.pop('visual_style_behavior', None)
+
+    image_strategy = result.get('image_strategy')
+    if not isinstance(image_strategy, dict):
+        return
+    legacy_behavior = image_strategy.pop('custom', None)
+    if image_strategy.get('rendering') == 'custom':
+        if not image_strategy.get('behavior') and legacy_behavior:
+            image_strategy['behavior'] = legacy_behavior
+        return
+    image_strategy.pop('behavior', None)
+
+
+def _expected_result_stage(confirm_dir: Path) -> str:
+    """Return the result stage expected from the current recommendations."""
+    try:
+        recommendations = _read_json_object(confirm_dir / RECOMMENDATIONS_NAME)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return 'final'
+    return {
+        1: 'stage1',
+        2: 'stage2',
+        3: 'final',
+    }.get(_recommendation_stage(recommendations), 'final')
 
 
 def _file_version(path: Path) -> Optional[float]:
@@ -504,39 +872,35 @@ def _sync_session_state(
     return session
 
 
-# Stage-1 anchors and Stage-2 design-system choices. On later pages these sections
-# are not rendered (they were already confirmed), so their values live only in
-# browser STATE — lost on a refresh. Folding them from result.json into the
-# served recommendations lets a refresh / reopen re-initialize from the user's
-# actual choices instead of catalog defaults.
-_ANCHOR_RECOMMEND_KEYS = (
+# Earlier-stage choices are not rendered on later pages, so their values live
+# only in browser STATE and would be lost on refresh. Fold them from result.json
+# into the served recommendations so a refresh / reopen resumes from the user's
+# actual communication contract and complete deck-solution choices.
+_CONTRACT_RECOMMEND_KEYS = (
     'canvas',
+)
+_CONTRACT_VALUE_KEYS = (
+    'audience',
+    'communication_intent',
+    'audience_outcome',
+    'core_message',
+    'delivery_context',
+    'artifact_afterlife',
+    'content_divergence',
+)
+_DECK_DIRECTION_RECOMMEND_KEYS = (
+    'delivery_purpose',
     'mode',
     'visual_style',
-    'delivery_purpose',
-    'template_adherence',
+    'icons',
+    'image_usage',
 )
-_ANCHOR_VALUE_KEYS = ('audience', 'content_divergence')
-_DESIGN_RECOMMEND_KEYS = ('icons', 'formula_policy')
-
-
-def _template_adherence_enabled(project_path: Path) -> bool:
-    """Return whether Step 3 loaded a deck/layout template into the project."""
-    spec_path = project_path / 'templates' / 'design_spec.md'
-    try:
-        lines = spec_path.read_text(encoding='utf-8').splitlines()
-    except OSError:
-        return False
-    if not lines or lines[0].strip() != '---':
-        return False
-    for line in lines[1:]:
-        stripped = line.strip()
-        if stripped == '---':
-            return False
-        match = re.fullmatch(r'kind\s*:\s*["\']?(brand|layout|deck)["\']?', stripped)
-        if match:
-            return match.group(1) in {'layout', 'deck'}
-    return False
+_PRODUCTION_RECOMMEND_KEYS = (
+    'formula_policy',
+    'image_ai_path',
+    'generation_mode',
+)
+_LOCKED_RECOMMENDATIONS_KEY = '_locked_recommendations'
 
 
 def _merge_confirmed_choices(data: dict, result_file: Path) -> None:
@@ -548,26 +912,108 @@ def _merge_confirmed_choices(data: dict, result_file: Path) -> None:
     recommend = data.setdefault('recommend', {})
     if not isinstance(recommend, dict):
         recommend = data['recommend'] = {}
-    for key in _ANCHOR_RECOMMEND_KEYS:
+    for key in _CONTRACT_RECOMMEND_KEYS:
         if res.get(key) not in (None, ''):
             recommend[key] = res[key]
-    for key in _ANCHOR_VALUE_KEYS:
+    for key in _CONTRACT_VALUE_KEYS:
         if key in res:
             data[key] = {'value': res.get(key) or ''}
     if _recommendation_stage(data) < 3:
         return
-    for key in _DESIGN_RECOMMEND_KEYS:
+    for key in _DECK_DIRECTION_RECOMMEND_KEYS:
         if res.get(key) not in (None, ''):
             recommend[key] = res[key]
     if 'page_count' in res:
         data['page_count'] = {'value': res.get('page_count') or ''}
+    if 'image_notes' in res:
+        data['image_notes'] = {'value': res.get('image_notes') or ''}
+    if 'template_application' in res:
+        data['template_application'] = {
+            'value': res.get('template_application') or '',
+        }
     if isinstance(res.get('color'), dict):
         data['color'] = {'selected': 0, 'candidates': [res['color']]}
     if isinstance(res.get('typography'), dict):
-        typography = {'selected': 0, 'candidates': [res['typography']]}
-        if res.get('formula_policy') not in (None, ''):
-            typography['formula_policy'] = {'value': res['formula_policy']}
-        data['typography'] = typography
+        data['typography'] = {'selected': 0, 'candidates': [res['typography']]}
+    if isinstance(res.get('image_strategy'), dict):
+        data['image_strategy'] = {
+            'selected': 0,
+            'candidates': [res['image_strategy']],
+        }
+    custom_candidates = data.get('custom_candidates')
+    if not isinstance(custom_candidates, dict):
+        custom_candidates = {}
+        data['custom_candidates'] = custom_candidates
+    for field, behavior_field in (
+        ('mode', 'mode_behavior'),
+        ('visual_style', 'visual_style_behavior'),
+    ):
+        behavior = res.get(behavior_field)
+        if res.get(field) != 'custom' or not str(behavior or '').strip():
+            continue
+        candidate = custom_candidates.get(field)
+        if not isinstance(candidate, dict):
+            candidate = {}
+        candidate['behavior'] = behavior
+        custom_candidates[field] = candidate
+    image_strategy = res.get('image_strategy')
+    if isinstance(image_strategy, dict) and image_strategy.get('rendering') == 'custom':
+        custom_candidates['image_strategy'] = image_strategy
+    # Stage 3 must retain its own production recommendations until final
+    # confirmation. A final-result reopen reflects those confirmed mechanics.
+    # Legacy single-pass results have no stage but do carry status=confirmed.
+    result_stage = _stage_key(res.get('stage'))
+    is_final = result_stage == 'final' or (
+        result_stage is None and res.get('status') == 'confirmed'
+    )
+    if not is_final:
+        return
+    for key in _PRODUCTION_RECOMMEND_KEYS:
+        if res.get(key) not in (None, ''):
+            recommend[key] = res[key]
+    if 'refine_spec' in res:
+        data['refine_spec'] = {'value': bool(res.get('refine_spec'))}
+
+
+def _apply_locked_recommendations(
+    result: dict,
+    recommendations_file: Path,
+    previous_result_file: Path,
+) -> dict:
+    """Restore profile-locked fields and return locks for staged carry-over."""
+    # This marker is server-owned; never accept a client-supplied carry-over map.
+    result.pop(_LOCKED_RECOMMENDATIONS_KEY, None)
+    locked_values = {}
+    try:
+        previous = _read_json_object(previous_result_file)
+    except (OSError, json.JSONDecodeError, ValueError):
+        previous = {}
+    previous_locks = previous.get(_LOCKED_RECOMMENDATIONS_KEY)
+    if isinstance(previous_locks, dict):
+        locked_values.update(previous_locks)
+
+    try:
+        recommendations = _read_json_object(recommendations_file)
+        recommendations_loaded = True
+    except (OSError, json.JSONDecodeError, ValueError):
+        recommendations = {}
+        recommendations_loaded = False
+
+    # Stage 1 starts a new contract and therefore replaces any stale locks left
+    # by an earlier run. Later stages inherit those locks across server restarts.
+    if (
+        recommendations_loaded
+        and _recommendation_stage(recommendations) in {0, 1}
+    ):
+        locked_values = {}
+    for key, field in recommendations.items():
+        if not isinstance(field, dict) or field.get('locked') is not True:
+            continue
+        if 'value' in field:
+            locked_values[key] = field.get('value') or ''
+    for key, value in locked_values.items():
+        result[key] = value
+    return locked_values
 
 
 def _wait_only_for_result(
@@ -586,9 +1032,17 @@ def _wait_only_for_result(
     logger.info('waiting for browser confirmation stage=%s...', target_stage)
     deadline = None if timeout <= 0 else time.time() + timeout
     while True:
-        if _result_stage(result_file) == target_stage:
+        current_stage = _result_stage(result_file)
+        if current_stage == target_stage:
             logger.info('confirmation stage=%s received: %s', target_stage, result_file)
             return 0
+        if _result_stage_number(current_stage) > _result_stage_number(target_stage):
+            logger.error(
+                'confirmation skipped expected stage=%s and advanced to %s',
+                target_stage,
+                current_stage,
+            )
+            return 2
 
         skip_error = _stage_skip_error(result_file.parent)
         if skip_error:
@@ -741,8 +1195,6 @@ def _ai_comparison_items(kind: str) -> list[dict[str, str]]:
 def _build_ai_image_comparison() -> dict:
     return {
         'rendering': _ai_comparison_items('rendering'),
-        'palette': _ai_comparison_items('palette'),
-        'type': _ai_comparison_items('type'),
     }
 
 
@@ -862,7 +1314,7 @@ def create_app(
 
     @app.route('/api/ai-image-comparison')
     def get_ai_image_comparison_manifest():
-        """Serve generated-image reference options from ai-image-comparison."""
+        """Serve generated-image rendering references for the current UI."""
         try:
             resp = jsonify(_build_ai_image_comparison())
             resp.headers['Cache-Control'] = 'no-store'
@@ -872,8 +1324,8 @@ def create_app(
 
     @app.route('/ai-image-comparison/<kind>/<filename>')
     def get_ai_image_comparison(kind: str, filename: str):
-        """Serve reference images for generated-image strategy candidates."""
-        if kind not in {'rendering', 'palette', 'type'}:
+        """Serve rendering images for generated-image strategy candidates."""
+        if kind != 'rendering':
             return jsonify({'error': 'invalid comparison kind'}), 404
         if not re.fullmatch(r'[A-Za-z0-9_.-]+\.png', filename or ''):
             return jsonify({'error': 'invalid comparison filename'}), 404
@@ -895,21 +1347,36 @@ def create_app(
         # Later stages render only downstream sections, so fold earlier confirmed
         # choices from result.json back in. A refresh / reopen then re-inits from
         # the user's choices instead of catalog defaults.
-        if _recommendation_stage(data) >= 2 and result_file.exists():
+        rec_stage_number = _recommendation_stage(data)
+        if rec_stage_number >= 2 and result_file.exists():
             _merge_confirmed_choices(data, result_file)
-        template_adherence_enabled = _template_adherence_enabled(project_path)
-        data['_template_adherence_enabled'] = template_adherence_enabled
+        if rec_stage_number == 2:
+            recommendation_error = _template_stage2_error(
+                data,
+                template_required=_template_confirmation_required(
+                    project_path,
+                    data,
+                ),
+            )
+            if recommendation_error:
+                return jsonify({'error': recommendation_error}), 409
+            recommendation_error = _stage2_custom_candidates_error(data)
+            if recommendation_error:
+                return jsonify({'error': recommendation_error}), 409
+            recommendation_error = _stage2_design_directions_error(data)
+            if recommendation_error:
+                return jsonify({'error': recommendation_error}), 409
+        # Template application is authored by Strategist from the installed
+        # workspace and current content. Never expose legacy mode fields as
+        # user-facing confirmation controls.
         recommend = data.get('recommend')
-        if template_adherence_enabled:
-            if not isinstance(recommend, dict):
-                recommend = data['recommend'] = {}
-            recommend.setdefault('template_adherence', 'adaptive')
-        else:
-            if isinstance(recommend, dict):
-                recommend.pop('template_adherence', None)
-            data.pop('template_adherence', None)
+        if isinstance(recommend, dict):
+            recommend.pop('template_reuse_scope', None)
+            recommend.pop('template_adherence', None)
+        data.pop('template_reuse_scope', None)
+        data.pop('template_adherence', None)
         # The page polls this endpoint after a stage-1 confirm until the AI
-        # overwrites the file with the re-derived stage-2 recommendations, so it
+        # overwrites the file with the once-authored stage-2 recommendations, so it
         # must never be served from a cache.
         resp = jsonify(data)
         resp.headers['Cache-Control'] = 'no-store'
@@ -923,18 +1390,52 @@ def create_app(
             return jsonify({'error': 'invalid payload'}), 400
         confirm_dir.mkdir(parents=True, exist_ok=True)
         result = dict(payload)
-        # Staged flow: stage-1 / stage-2 submits record intermediate choices but do
+        result_file = confirm_dir / RESULT_NAME
+        raw_stage = result.get('stage')
+        stage = _stage_key(raw_stage)
+        if raw_stage is not None and stage is None:
+            return jsonify({'error': 'invalid confirmation stage'}), 400
+        stage_error = _submission_stage_error(
+            project_path,
+            confirm_dir,
+            stage,
+        )
+        if stage_error:
+            return jsonify({'error': stage_error}), 409
+        custom_error = _custom_selection_error(result)
+        if custom_error:
+            return jsonify({'error': custom_error}), 400
+        try:
+            current_recommendations = _read_json_object(
+                confirm_dir / RECOMMENDATIONS_NAME,
+            )
+        except (OSError, json.JSONDecodeError, ValueError):
+            current_recommendations = {}
+        if stage == 'stage2' or _recommendation_stage(current_recommendations) == 3:
+            solution_error = _stage2_solution_error(result)
+            if solution_error:
+                return jsonify({'error': solution_error}), 400
+        _normalize_custom_selections(result)
+        locked_values = _apply_locked_recommendations(
+            result,
+            confirm_dir / RECOMMENDATIONS_NAME,
+            result_file,
+        )
+        result.pop('template_reuse_scope', None)
+        result.pop('template_adherence', None)
+        # Staged flow: Stage 1 / Stage 2 submits record intermediate choices but do
         # NOT close the page. Only a final submit is a full confirmation. A
-        # payload with no stage is a single-pass confirmation (chat-opt-out parity).
-        stage = _stage_key(result.get('stage'))
+        # payload with no stage is a legacy free-design single-pass confirmation.
         if stage in {'stage1', 'stage2'}:
             result['stage'] = stage
             result['status'] = f'{stage}-confirmed'
+            if locked_values:
+                result[_LOCKED_RECOMMENDATIONS_KEY] = locked_values
         else:
+            result.pop(_LOCKED_RECOMMENDATIONS_KEY, None)
             result['stage'] = 'final'
             result['status'] = 'confirmed'
         result['confirmed_at'] = time.strftime('%Y-%m-%dT%H:%M:%S')
-        result_file = confirm_dir / RESULT_NAME
         _write_json_atomic(result_file, result)
         _sync_session_state(
             confirm_dir,
@@ -975,7 +1476,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         '--wait-stage', default='final', metavar='{stage2,final}',
         help='With --wait-only, wait for this result.json stage (default: final). '
-             'Use stage2 for the middle handoff in the three-stage flow.',
+             'Use stage2 for the direction handoff in the three-stage flow.',
     )
     parser.add_argument(
         '--wait-timeout', type=int, default=WAIT_TIMEOUT_DEFAULT,

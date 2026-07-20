@@ -2,29 +2,27 @@
 
 This directory holds **brand-only templates**: identity bundles (color / typography / logo / voice / icon style) without an SVG page roster. Strategist locks the brand's identity segment as truth; Executor designs pages freely under those constraints.
 
-Brand is one of three template kinds in the library — alongside [`layouts/`](../layouts/) (structure-only) and [`decks/`](../decks/) (complete identity + structure). Full data model: [`docs/zh/templates-architecture.md`](../../../../docs/zh/templates-architecture.md).
+Brand is one of three template kinds in the library — alongside
+[`layouts/`](../layouts/) (brand-neutral structure) and [`decks/`](../decks/)
+(a recurring application with integrated identity and structure). The shared
+kind and workspace model lives in the parent [`README.md`](../README.md).
 
 ## How brands are consumed
 
-Brand application follows the **same explicit-path rule and workspace routing as all template kinds** at SKILL.md Step 3:
-
-| User input at SKILL.md Step 3 | Behavior |
-|---|---|
-| An explicit brand workspace path (e.g. `templates/brands/anthropic/`) | Resolve `templates/design_spec.md`; stage `templates/` plus any existing `images/` and `icons/` into the matching project directories; Strategist locks the identity segment |
-| Bare brand name only ("use anthropic brand"), brand mention without path, or silence | Skip — same mechanical rule as all template kinds: bare names never trigger |
-| Brand path + layout path | Fuse into one `design_spec.md` — brand owns identity segment (color / typography / logo / voice / icon style); layout owns structure segment (canvas / page roster). See `SKILL.md` Step 3. |
-| Brand path + deck path | Fuse — brand identity overrides deck identity; structure + middle segments come from deck |
-| Brand path + layout path + deck path | Three-way fuse — brand=identity, layout=structure, deck=middle |
-| Two brand paths | Conflict resolution prompt before fusion — user picks per-segment source |
-
-`brands_index.json` is discovery-only; listing brands never advances the pipeline.
+Brand application follows the common explicit-path trigger in
+[`generate-pptx`](../../workflows/generate-pptx.md) Step 3. The conditional
+[`apply-template-workspace`](../../workflows/stages/apply-template-workspace.md)
+stage owns path normalization, portable-root installation, multi-kind fusion,
+same-kind conflict resolution, and provenance. This file owns only the Brand
+schema. `brands_index.json` is discovery-only; listing brands never advances
+the pipeline.
 
 ## Creating a new brand
 
-Run the standalone workflow:
+Enter the fixed Create Template route, which dispatches the Create Brand child workflow:
 
 ```
-Read skills/ppt-master/workflows/create-brand.md
+Read skills/ppt-master/workflows/create-template.md, which dispatches `kind: brand` to skills/ppt-master/workflows/create-template/create-brand.md
 ```
 
 Three input paths are supported: brand asset (logo / brand site URL / branded PPTX / brand PDF), verbal spec dictated in chat, or empty skeleton for the user to fill in later.
@@ -52,4 +50,4 @@ Logo filenames are descriptive, not contractual — `templates/design_spec.md` �
 
 [brands_index.json](./brands_index.json) is a slim machine-readable map (`brand_id → { summary, primary_color }`). Refresh it with `register_template.py --kind brand <brand_id>` after a brand is created or edited. Registration rejects incomplete frontmatter, mismatched IDs, page SVGs, missing required identity sections, invalid or inconsistent colors/provenance, and broken workspace-local asset references.
 
-Listing the index does not trigger any pipeline action — Step 3 triggers only on an explicit directory path supplied by the user, regardless of whether the brand appears in the index.
+Listing the index does not trigger any pipeline action — Generate Step 3 triggers only on an explicit directory path supplied by the user or an exact validated Create Template handoff, regardless of whether the brand appears in the index.

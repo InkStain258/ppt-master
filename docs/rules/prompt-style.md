@@ -74,7 +74,8 @@ Begin substantive paragraphs with a bolded short label. Reuse this fixed vocabul
 
 ✅ Good (from `executor-base.md`):
 ```
-**Hard rule**: Before generating **each** SVG page, `read_file <project_path>/spec_lock.md`.
+**Hard rule**: Before generating **each** SVG page, run:
+`python3 skills/ppt-master/scripts/project_manager.py page-context <project_path> P<NN> --record-usage`.
 
 **Forbidden — values outside the lock**:
 - Colors (fill / stroke / stop-color) MUST come from `colors`
@@ -201,7 +202,7 @@ The canonical exemplars to model new files after:
 
 | If you're writing... | Model after |
 |---|---|
-| A role reference (Image_X / Strategist-style) | [`image-searcher.md`](../skills/ppt-master/references/image-searcher.md), [`strategist.md`](../skills/ppt-master/references/strategist.md) |
-| A shared spec across roles | [`image-base.md`](../skills/ppt-master/references/image-base.md), [`shared-standards.md`](../skills/ppt-master/references/shared-standards.md) |
-| A technical / format spec | [`canvas-formats.md`](../skills/ppt-master/references/canvas-formats.md), [`svg-image-embedding.md`](../skills/ppt-master/references/svg-image-embedding.md), [`image-layout-spec.md`](../skills/ppt-master/references/image-layout-spec.md) |
-| Workflow runbook | [`workflows/verify-charts.md`](../skills/ppt-master/workflows/verify-charts.md) |
+| A role reference (Image_X / Strategist-style) | [`image-searcher.md`](../../skills/ppt-master/references/image-searcher.md), [`strategist.md`](../../skills/ppt-master/references/strategist.md) |
+| A shared spec across roles | [`image-base.md`](../../skills/ppt-master/references/image-base.md), [`shared-standards-core.md`](../../skills/ppt-master/references/shared-standards-core.md) |
+| A technical / format spec | [`canvas-formats.md`](../../skills/ppt-master/references/canvas-formats.md), [`svg-image-embedding.md`](../../skills/ppt-master/references/svg-image-embedding.md), [`image-layout-spec.md`](../../skills/ppt-master/references/image-layout-spec.md) |
+| Stage runbook | [`workflows/stages/verify-charts.md`](../../skills/ppt-master/workflows/stages/verify-charts.md) |

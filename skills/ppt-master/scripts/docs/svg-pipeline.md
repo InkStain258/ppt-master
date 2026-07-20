@@ -1,6 +1,8 @@
 # SVG Pipeline Tools
 
-> Architecture rationale (why each artifact / step exists, deletion impact, two-consumer relationship between `svg_finalize/` and native pptx conversion): see [docs/technical-design.md "Post-Processing Pipeline"](../../../../docs/technical-design.md#post-processing-pipeline).
+> **Maintenance boundary**: post-processing modules serve both the on-disk
+> `svg_final/` preview and in-memory native PPTX conversion. Check both
+> consumers before changing or removing a step.
 
 These tools cover post-processing, SVG validation, speaker notes, recorded narration, and PPTX export.
 
@@ -19,8 +21,8 @@ python3 scripts/svg_authoring_view.py <svg-file-or-directory> -o <output-dir> \
 The operation is non-destructive and refuses existing output files unless
 `--force` is explicit. It never writes back to the source SVG. The JSON report
 on stdout records original/projected byte counts and removals by category. The
-output directory contains the editable SVGs and one atomic
-`authoring_manifest.json` sidecar.
+output directory contains the editable SVGs, one model-readable
+`authoring_summary.json`, and one tool-only `authoring_manifest.json`.
 
 The projected copy:
 
@@ -32,14 +34,26 @@ The projected copy:
 - keeps visible paths, text, images, stable ids, Master/Layout root markers,
   selected native-shape intent, and a document-local `data-pptx-source-ref` on
   each imported logical object;
-- rewrites relative local asset references for the projection's new location.
+- rewrites relative local asset references for the projection's new location;
+- compacts imported model-facing frames and safe transform page coordinates to
+  at most two decimals.
 
-The manifest stores relative source/authoring filenames, source and initial
-authoring hashes, and source element paths. It deliberately does not copy the
-opaque payload. The authoring bundle is the editable source for template
-creation; the complete imported SVG remains immutable native-payload backing.
-Final `templates/*.svg` files are materialized and validated from that pair.
-The IR directory itself is not a supported direct input to `svg_to_pptx.py`.
+The summary stores the current SVG roster plus compact per-file canvas, size,
+text, image, vector, placeholder, icon, and source-ref counts. Models read the
+summary and editable SVGs; they do not read the machine manifest. The manifest
+stores relative source/authoring filenames, source and initial authoring hashes,
+and source element paths. It deliberately does not copy the opaque payload.
+The authoring bundle is the editable source for template creation; the complete
+imported SVG remains immutable native-payload backing. Final
+`templates/*.svg` files are materialized and validated from that pair. The IR
+directory itself is not a supported direct input to `svg_to_pptx.py`.
+
+Regenerate the summary after direct edits that do not pass through one of the
+in-place normalization tools:
+
+```bash
+python3 scripts/svg_authoring_view.py <authoring-dir> --refresh-summary
+```
 
 This projection is separate from canonical preset authoring. New project SVGs
 and project-owned templates use the compact authored form: one atomic
@@ -49,9 +63,35 @@ check and export rerender the locked registry to validate that group, so the
 compact form has no hidden carrier, preview wrapper, or serialized preview
 fingerprint. `pptx_to_svg.py` continues to emit the expanded carrier/preview
 evidence required for import and round-trip decisions. The normative boundary
-is owned by [`shared-standards.md`](../../references/shared-standards.md), with
+is owned by [`shared-standards-core.md`](../../references/shared-standards-core.md) §1.5, with
 authoring guidance in
 [`native-shape-authoring.md`](../../references/native-shape-authoring.md).
+
+## `compact_svg_coordinates.py`
+
+Compact safe model-facing page-space coordinates without rewriting unrelated
+SVG formatting:
+
+```bash
+python3 scripts/compact_svg_coordinates.py <svg-file-or-directory>
+python3 scripts/compact_svg_coordinates.py <template-directory> \
+  --inplace --keep-native-frames
+```
+
+The default run is a dry-run JSON report. `--inplace` atomically replaces only
+changed SVG files. The shared create-template final pass uses
+`--keep-native-frames`: it compacts `data-pptx-bounds`, translation values,
+rotation centers, and
+matrix `e/f`, while preserving canonical
+authored-preset or inline native frames. `svg_authoring_view.py` separately
+compacts imported model-facing frames because unchanged mirror refs can recover
+their exact coordinates from immutable lossless backing.
+
+The compactor never rounds path/points geometry, normalized crop or nested
+`viewBox` ratios, gradient offsets, opacity, scale arguments, rotation angles,
+or matrix `a/b/c/d` coefficients. Type A mirror materialization invokes the
+same compactor before native-record externalization; `standard` and `fidelity`
+use the shared final pass before template validation.
 
 ## `extract_svg_assets.py`
 
@@ -76,9 +116,11 @@ generated files for their respective prefixes. In create-template workspaces,
 `imported` is the fixed namespace: assets live once under `icons/imported/`, and
 the working SVGs reference them as `data-icon="imported/<name>"`. Inventory
 entries retain source refs from each extracted subtree, allowing expansion to
-restore the authoring-manifest mapping. A rerun on an
+reconnect the authoring-manifest mapping. A rerun on an
 already rewritten namespaced projection inventories those references and does
-not progressively extract their remaining parent or sibling geometry.
+not progressively extract their remaining parent or sibling geometry. An
+in-place pass over an authoring bundle refreshes `authoring_summary.json`
+automatically.
 
 ## `mirror_template_materialize.py`
 
@@ -91,7 +133,8 @@ python3 scripts/mirror_template_materialize.py \
 ```
 
 The command treats `<import_workspace>/authoring-svg/` as the sole editable
-source. It validates the layered authoring manifest, immutable lossless SVG
+source. It reads the tool-only layered authoring manifest internally and
+validates it against immutable lossless SVG
 hashes, source PPTX hash, complete Master/Layout/Slide graph, inheritance
 visibility facts, source-ref closure, and extracted-vector inventory before it
 writes anything. It refuses a non-empty destination and stages the whole result
@@ -102,20 +145,46 @@ Materialization preserves source page order and emits one definition-only
 `layout_<layout_key>.svg` for every source Layout unused by all source Slides.
 It mechanically expands fixed Master/Layout group wrappers into direct atoms,
 rehydrates only unchanged converter-supported Slide-local/slot refs, keeps the
-current SVG fallback for edited refs, restores explicit text hard breaks, and
-removes every IR-only source ref. Source `p:sldLayout@showMasterSp` and
+current SVG fallback for edited refs, preserves explicit text hard breaks, and
+removes every IR-only source ref. Imported axis-flipped groups retain their
+geometry reflection while descendant SVG text receives a matching
+counter-reflection, preserving PowerPoint's upright glyph appearance in browser
+previews. Supported opaque `p:txBody`,
+relationship-free `p:style`, and `a:custGeom` payloads are deduplicated into
+`templates/native_payloads.json.gz`. Repeated native restoration attributes
+are stored there as short `data-pptx-native-ref` records; page and
+imported-vector SVGs retain only those record ids and content-hash payload
+references. The native record referenced by an imported text placeholder
+carrier owns its authoritative source frame, so the Slide-local frame can
+differ from reusable Layout bounds without restoring long exact coordinates
+inline. Structural Master/Layout, placeholder, layer, and editable-object
+fields remain inline. Source `p:sldLayout@showMasterSp` and
 `p:sld@showMasterSp` facts become canonical root
 `data-pptx-show-master-shapes` and
-`data-pptx-show-inherited-shapes` booleans. An imported text placeholder keeps
-its authoritative native frame on the `<text data-pptx-frame>` carrier so the
-Slide-local frame can differ from the reusable Layout bounds without collapsing
-to glyph bounds.
+`data-pptx-show-inherited-shapes` booleans.
+
+Checker, template-structure validation, and export hydrate both store layers in
+memory; legacy inline payload and v1 payload-only stores remain readable.
+
+The published `ppt-master.template-execution-manifest.v1` roster points to one
+compact `ppt-master.template-text-slots.v2-min` sidecar per prototype. Each text
+slot contains only `selector`, `role`, `current_text`, `text_segments`, and
+`tspan_count`; a top-level tool hash covers its selectors and immutable
+text/tspan topology and attributes. These records are deterministic tool
+diagnostics, not page-authoring inputs. Page-context emits only the complete
+prototype's path and SHA for that reference, so the model reads the SVG once
+per execution context and reuses it until the SHA changes. The model chooses
+semantics and edits only existing visible text values, while checker and
+structured export validate output attributes, text/tspan topology, and
+referenced-resource hashes against
+the prototype.
 
 The output routes reusable vectors once to `icons/imported/`, bitmaps to
 `images/`, and other referenced files to `templates/assets/`. The JSON report
-is written to stdout only. The command intentionally does not create
-`templates/design_spec.md`; Template_Designer writes that personality and page
-roster after materialization. This compiler is for Type A mirror restoration,
+reports payload occurrence, native-record, unique-byte, and compressed-store
+counts and is written to stdout only. The command intentionally does not create
+`templates/design_spec.md`; Template_Designer writes the package-specific rules
+and page roster after materialization. This compiler is for Type A mirror materialization,
 not `standard` / `fidelity`, loose Type B SVGs, ordinary generation, finalize,
 or export.
 
@@ -150,11 +219,13 @@ effect once inside the SVG asset and again to the replacement `<image>`.
 Scripts, `foreignObject`, SVG animation, remote resources, and external SVG
 fragment references fail closed; local image/CSS resources must stay inside
 the declared `--resource-root` and are embedded into the asset.
+An in-place rewrite inside an authoring bundle refreshes
+`authoring_summary.json` automatically.
 
 This operation belongs only to an explicit `create-template` normalization
 decision in `standard` or `fidelity` mode. It does not choose groups, detect
 repetition, infer a Master/Layout, or run during ordinary import, free
-generation, mirror restoration, finalize, or export. Placeholder, native
+generation, mirror materialization, finalize, or export. Placeholder, native
 single-shape, table/chart, icon-placeholder, and authored-preset groups are
 rejected because they already own a different semantic route.
 
@@ -169,13 +240,28 @@ Do not confuse this tool with `extract_svg_assets.py`:
 
 ## Recommended Pipeline
 
-Run these steps in order:
+Run these steps one at a time. Wait for each command to exit successfully before
+starting the next command.
 
 ```bash
 python3 scripts/total_md_split.py <project_path>
+```
+
+After `total_md_split.py` exits successfully, run:
+
+```bash
 python3 scripts/finalize_svg.py <project_path>
+```
+
+After `finalize_svg.py` exits successfully, run:
+
+```bash
 python3 scripts/svg_to_pptx.py <project_path>
 ```
+
+Do not start another post-processing command while the current command is still
+running. The canonical gates and success criteria are owned by
+[`generate-pptx.md`](../../workflows/generate-pptx.md) Step 7.
 
 ## `finalize_svg.py`
 
@@ -207,16 +293,29 @@ python3 scripts/svg_to_pptx.py <project_path> -t none
 python3 scripts/svg_to_pptx.py <project_path> --auto-advance 3
 python3 scripts/svg_to_pptx.py <project_path> --animation mixed --animation-duration 0.8
 python3 scripts/svg_to_pptx.py <project_path> --no-merge   # strict line-fidelity mode (see below)
-python3 scripts/notes_to_audio.py <project_path> --voice zh-CN-XiaoxiaoNeural
 python3 scripts/svg_to_pptx.py <project_path> --recorded-narration audio
 ```
+
+For generated-project narration, follow the
+[`generate-audio`](../../workflows/stages/generate-audio.md) stage. It owns voice
+selection, audio generation, and the narrated re-export workflow.
 
 Behavior:
 - Default output (default-flow mode, no `-o`):
   - `exports/<project_name>_<timestamp>.pptx` — native editable pptx (canonical output)
+  - `validation/<project_name>_<timestamp>.report.json` — package postflight, quality-gate linkage, unresolved resource audit, and published part counts
   - `backup/<timestamp>/svg_output/` — copy of Executor SVG source, always written so the pptx can be rebuilt via `finalize_svg → svg_to_pptx` without re-running the LLM
+- `exports/` contains only final PPTX deliverables; machine-readable quality and postflight reports belong in `validation/`.
 - `finalize_svg.py` always creates `svg_final/` before export. This directory is the self-contained SVG visual preview; it is not packaged as a second PPTX.
-- Explicit `-o/--output` changes the native PPTX destination and skips `backup/`.
+- Explicit `-o/--output` changes the native PPTX destination and skips `backup/`; its postflight report still uses the output stem under the project `validation/` directory.
+- Postflight reruns ZIP integrity and published Slide count. Internal relationships,
+  structured-package validation, transitions, and animations are enforced before the
+  builder publishes the PPTX and are reported as `enforced-at-build`, not as repeated
+  postflight checks.
+- `font_portability` warns only when a complete font stack contains generic CSS families
+  and no concrete family name. A recommended stack such as
+  `"Microsoft YaHei", Arial, sans-serif` does not warn merely because it ends with a
+  generic fallback.
 - Paragraph merging is enabled by default and trades some SVG line-layout fidelity for PowerPoint editability:
   - Default: mergeable paragraph blocks (same x, dy clustered around one base line-height) collapse into one editable text frame. Equal effective font sizes may join as flowing prose; a font-size change, list marker, or accepted larger gap starts a new `<a:p>` with precise `<a:lnSpc>` / `<a:spcBef>`. Resizing the box reflows text inside it without erasing those paragraph boundaries.
   - With `--no-merge`: every dy-stacked `<tspan>` becomes its own text frame — exact SVG line layout is preserved but a 12-line paragraph is 12 separate textboxes
@@ -231,15 +330,19 @@ Behavior:
   inputs and package-level processing.
 - For PPTX template-import workspaces, use `-s svg-flat` when you need a visual round-trip check. The layered `svg/` tree is the machine-readable template source and intentionally does not inline inherited master / layout decoration into each slide.
 - Native mode is strict about unsupported visual SVG elements: if a visual element cannot be represented or safely preserved, export fails with the SVG file, element tag, and position instead of silently dropping content.
-- Omitting `--pptx-structure` reads `spec_lock.md`. Free-design and brand-only releases declare `mode: flat`, omit Master/Layout mappings and SVG structure metadata, and materialize one clean project-owned Master plus one Blank Layout from the current lock. Deck/layout template releases declare `mode: structured` with complete unique `pptx_masters` / `pptx_layouts` rosters and one `page_pptx_layouts` assignment per page. A template-backed Layout definition may remain unused by pages and still register in the final package.
+- Omitting `--pptx-structure` reads `spec_lock.md`. Free-design, brand-only, and `template_reuse_scope: style` releases declare `mode: flat`, omit Master/Layout mappings and SVG structure metadata, and materialize one clean project-owned Master plus one Blank Layout from the current lock. Deck/layout templates use `mode: structured` only for `template_reuse_scope: mirror|layout`, with complete unique `pptx_masters` / `pptx_layouts` rosters and one `page_pptx_layouts` assignment per page. A template-backed Layout definition may remain unused by pages and still register in the final package.
 - On structured template routes, every page root repeats Master/Layout keys and picker names. Master/Layout fixed visuals are direct semantic atoms. Ordinary layer `<g>` elements are invalid; one validated compact authored-preset `<g>` emitted by `preset_shape_svg.py` is the sole group exception because it compiles to one native shape.
+- Every visible direct root `<g>` requires root-coordinate `data-pptx-bounds`; nested bounds are ignored. Frame/native metadata never replaces it; placeholder bounds also define the slot frame. Checker compares root bounds with `viewBox` and only descendant text with that module. Images, shapes, paths, `<use>`, effects, and object frames are excluded. Per side: ≤`1px` ignored, ≤`5%` warns, >`5%` fails. Bounds never clip/reflow.
+- Missing root bounds fails on final pages/templates and under `--template-mode`; references warn until adapted.
 - On structured template routes, each normal slot is a direct root `<g id>` with semantic type, positive design-zone bounds, and exactly one compatible carrier. Composite `object` slots use explicit proxy binding; zero-slot Layouts are valid. Flat pages keep all SVG objects Slide-local.
 - Flat export maps locked typography/colors into a clean project-owned theme/Master, removes stock content placeholders and unused built-in Layouts, retains only the standard date/footer/slide-number capability hooks, and keeps one Blank Layout without promoting Slide content. Structured export additionally creates one reusable Layout per declared key and reopens the package to verify the full Presentation → Master → Layout → Slide graph, fixed-object order, placeholder identities/bounds, carrier bindings, hidden proxies, and zero-slot Layouts.
 - Template `page_layouts` remains input provenance. Strict preserves the prototype contract; adaptive retains its Master and may use a new Layout identity only when fixed Layout atoms or slot topology/bounds change.
-- Legacy structured/template contracts using `baseline`, `template`, `preserve`, `layout_strategy`, `data-pptx-layout-kind`, `distilled`/`utility`, direct atomic placeholders, or incomplete Master identity are rejected with a pointer to [`restore-pptx-structure`](../../workflows/restore-pptx-structure.md). Explicit flat free-design/brand-only projects intentionally omit Master identity.
+- Legacy structured/template contracts using `baseline`, `template`, `preserve`, `layout_strategy`, `data-pptx-layout-kind`, `distilled`/`utility`, direct atomic placeholders, or incomplete Master identity are rejected with a pointer to [`create-template`](../../workflows/create-template.md). Create a new workspace and generate new structured SVG pages; do not upgrade the existing project in place. Explicit flat free-design/brand-only projects intentionally omit Master identity.
 - Native output uses content-hash media filenames, so identical images are reused and different images cannot overwrite each other by sharing a basename.
 - `[Content_Types].xml` is generated from the actual media extensions written into the PPTX. Unknown media extensions fail unless Python's `mimetypes` can identify them.
 - Native export writes to a temporary file first and publishes the requested PPTX only after conversion succeeds. A failed conversion does not replace the main output file.
+- After publication, native export writes `validation/<output_stem>.report.json`. The report distinguishes authored Slides from internal Layout definitions, reruns ZIP integrity and published Slide-count checks, records slide/layout/master/notes part counts, labels relationship/structured/transition/animation validation as enforced at build time, links the final SVG quality report only when its SHA-256 source fingerprint matches the exact export inputs, and surfaces stale/unverified gates, unresolved template tokens, generic-only font stacks, and external image references. A matching final quality report with introduced warnings yields `passed-with-warnings` and a `quality_introduced_warnings=<N>` receipt instead of a clean `passed` claim.
+- By default, a successful command also prints a compact receipt instead of requiring a report read: `[POSTFLIGHT] status=<...> quality_gate=<...> slides=<N> warning_categories=<N>`, followed by one compact line per warning category and the `[PPTX]` / `[REPORT]` paths. Resource-warning lines carry counts; a non-passing quality gate carries its status. Routine agents use this receipt and do not load either complete validation JSON into model context. Full reports remain cold audit artifacts; failure investigation and explicit audits extract only the required fields. `--quiet` keeps suppressing successful-run output.
 - Before publishing structured template output, export reopens the temporary PPTX and validates the Slide → Layout → Master graph and registrations, Layout identity, placeholder identity, reusable bounds, and prompt/level-one sizes. A mismatch aborts publication. Flat release instead validates its single referenced Master/Layout shell and exact date/footer/slide-number hook roster before packaging.
 - SVG clip paths are still restricted for authored SVGs, but nested crop wrappers generated by PPTX import are mapped back to native picture crop / geometry when possible.
 - Speaker notes are embedded automatically unless `--no-notes` is used
@@ -303,6 +406,8 @@ Validate SVG technical compliance.
 python3 scripts/svg_quality_checker.py examples/project/svg_output/01_cover.svg
 python3 scripts/svg_quality_checker.py examples/project/svg_output
 python3 scripts/svg_quality_checker.py examples/project
+python3 scripts/svg_quality_checker.py examples/project --stage first-page
+python3 scripts/svg_quality_checker.py examples/project --stage final --json
 python3 scripts/svg_quality_checker.py examples/project --format ppt169
 python3 scripts/svg_quality_checker.py --all examples
 python3 scripts/svg_quality_checker.py examples/project --export
@@ -319,6 +424,18 @@ Checks include:
 
 Warnings are advisory: they require no modification or acknowledgement and do
 not affect the command's zero exit status. Only errors block the quality gate.
+
+`--stage first-page` resolves only the first authored SVG and permits an incomplete
+future page roster. `--stage final` checks the complete project. With `--json`,
+the final stage writes `validation/svg_quality_report.json`, while the first-page
+stage writes `validation/svg_quality_first_page_report.json` so it cannot overwrite
+the release gate (or use `--json-output`). The report separates
+release failures (`blocking`), changed/new advisories (`introduced`),
+prototype-identical diagnostics (`inherited`), and source-conversion losses
+(`source-import`). It also fingerprints every checked SVG so postflight cannot
+mistake a stale report for the current export gate. On a successful run, use the
+checker exit status and terminal summary; do not load the complete JSON unless a
+failure investigation or explicit audit requires targeted fields.
 
 Template mode accepts the same compact canonical preset groups as generated
 pages: one atomic `<g data-pptx-authoring="preset">` with direct visible paths.
@@ -392,9 +509,11 @@ Replaces `<use data-icon="chunk-filled/name" .../>`, `<use data-icon="tabler-fil
 
 ## SVG Compatibility Contract
 
-The canonical SVG authoring and native-mapping contract lives exclusively in
-[`shared-standards.md`](../../references/shared-standards.md). This tool guide
-does not repeat accepted syntax, rejected constructs, or conditional limits.
+The always-on SVG authoring contract lives in
+[`shared-standards-core.md`](../../references/shared-standards-core.md), with
+advanced effects, native data objects, and structured PPTX metadata owned by
+their conditionally loaded modules. This tool guide does not repeat accepted
+syntax, rejected constructs, or conditional limits.
 
 `svg_quality_checker.py` validates source SVG before finalization.
 `finalize_svg.py` and native export apply the preprocessing required by that
