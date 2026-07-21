@@ -13,8 +13,8 @@ Main entry point for project setup and validation.
 ```bash
 python3 scripts/project_manager.py init <project_name> --format ppt169
 python3 scripts/project_manager.py import-sources <project_path> <source1_or_dir> [<source2_or_dir> ...]
-python3 scripts/project_manager.py scaffold-spec <project_path>
-python3 scripts/project_manager.py scaffold-lock <project_path>
+python3 scripts/project_manager.py scaffold-spec <project_path>  # optional manual helper
+python3 scripts/project_manager.py scaffold-lock <project_path>  # optional manual helper
 python3 scripts/project_manager.py validate <project_path>
 python3 scripts/project_manager.py info <project_path>
 python3 scripts/project_manager.py page-context <project_path> P07 [--pretty] [--record-usage]
@@ -35,27 +35,34 @@ Notes:
   note), to avoid leaving unintended artifacts that could be committed by mistake.
   Pass `--copy` to force a copy for in-repo sources instead.
 - `--move` and `--copy` are mutually exclusive.
-- `scaffold-spec` creates `design_spec.md` from
+- Normal Generate authoring reads `templates/design_spec_reference.md`, writes
+  the complete `design_spec.md` from scratch, then reads
+  `templates/spec_lock_reference.md` and writes the complete lock projection.
+  It does not call either scaffold command.
+- Optional `scaffold-spec` creates `design_spec.md` from
   `templates/scaffolds/design_spec.md`; `scaffold-lock` creates `spec_lock.md`
   from `templates/scaffolds/spec_lock.md`. Both substitute project/canvas
   metadata deterministically and refuse to overwrite an existing artifact.
 - `validate` parses the existing Markdown artifacts against
   `templates/schemas/design_spec.schema.json` and
   `templates/schemas/spec_lock.schema.json`. It reports missing sections and
-  fields, illegal enums, malformed page keys, and unmet conditional sections;
+  fields, illegal enums, malformed page keys, and unmet conditional sections.
+  When optional custom reference lists are present, it also requires every id
+  to resolve to the matching mode, visual-style, or image-rendering catalog,
+  rejects duplicates, and rejects reference rows on non-custom selections;
   it does not rewrite either artifact or compare their values for textual
   equality. It also does not prove final-confirmation → Design Spec fidelity or
-  Design Spec → lock semantic projection; Generate Step 4 owns those two gates
-  before this structural validation. One slice is enforced mechanically: when
-  `confirm_ui/result.json` records a final confirmed stage, every confirmed
-  non-`none` `image_usage` source must appear in at least one `## images` row
-  of the lock (`provided` maps to `user`; `ai` is also satisfied by `slice`).
-  The design schema is structural lint for
+  Design Spec/context → lock semantic fidelity; Generate Step 4 owns those two
+  gates before this structural validation. Validation reads the planning
+  artifacts only and never reopens `confirm_ui/result.json`; the final result is
+  consumed once into the Design Spec before validation begins. The design schema is structural lint for
   the human-readable brief; the lock schema owns machine execution values. For
   structured template use, strict input prototypes must match their assigned
   Master/Layout; adaptive input prototypes retain the assigned Master while a
-  new output Layout is validated only after its generated SVG exists. Versioned
-  scaffolds carry the schema marker. Markerless legacy artifacts are left on
+  new output Layout already declared by Strategist is cross-validated after its
+  generated SVG exists. Versioned
+  Direct-authored current artifacts and optional scaffolds carry the schema
+  marker. Markerless legacy artifacts are left on
   their prior validation path with a warning;
   malformed or unsupported markers are errors.
 - PPTX-family inputs are enriched automatically under `analysis/` with
@@ -72,14 +79,18 @@ changes JSON formatting only. Before projection it revalidates the machine lock
 and selected template-root identities; design-brief values are not treated as
 a second lock. Slide headings at H3–H6 remain readable by the projector.
 
-The output deliberately repeats the bounded `global` lock projection on every
-page as an anti-drift guard. `lock_source` binds that projection to the current
+The output deliberately repeats the bounded `global` anchor set on every
+page as a cross-page anchor set, not a color/font allowlist. `lock_source` binds that projection to the current
 `spec_lock.md` SHA. `page_context` contains the current §IX brief, rhythm,
 resources, and conditional template/chart assignment. `reference_set` contains
-only `kind`, scoped path, SHA, and `once-per-execution-context` policy for the
-project/template Design Specs and selected prototype/chart SVGs. A model reads
-a referenced file only when that exact path + SHA is absent from its active
-context or has changed, then reuses the retained understanding on later pages.
+`kind`, scoped path, SHA, and `once-per-execution-context` policy for the
+project/template Design Specs and selected prototype/chart SVGs. The project
+Design Spec additionally carries
+`same_context_edit_policy: targeted-readback-and-rebind`: when the current main
+agent makes a bounded repair that preserves roster/order/identity/communication,
+it reads back only the exact changed fragments,
+validates, reruns `page-context`, and binds the verified delta to the new SHA.
+Fresh, external, unknown, or mismatched changes still require a complete read.
 
 The deprecated `--bundle` flag remains accepted as a compatibility no-op. It
 never appends a Design Spec, prototype SVG, chart SVG, manifest, or text-slot
@@ -122,8 +133,8 @@ Examples:
 
 ```bash
 python3 scripts/project_manager.py init my_presentation --format ppt169
-python3 scripts/project_manager.py scaffold-spec projects/my_presentation_ppt169_20251116
-python3 scripts/project_manager.py scaffold-lock projects/my_presentation_ppt169_20251116
+python3 scripts/project_manager.py scaffold-spec projects/my_presentation_ppt169_20251116  # optional
+python3 scripts/project_manager.py scaffold-lock projects/my_presentation_ppt169_20251116  # optional
 python3 scripts/project_manager.py validate projects/my_presentation_ppt169_20251116
 python3 scripts/project_manager.py info projects/my_presentation_ppt169_20251116
 python3 scripts/project_manager.py page-context projects/my_presentation_ppt169_20251116 P07 --record-usage
