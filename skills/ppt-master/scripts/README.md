@@ -73,15 +73,15 @@ Project setup:
 ```bash
 python3 scripts/project_manager.py init <project_name> --format ppt169
 python3 scripts/project_manager.py import-sources <project_path> <source_files_or_dirs...> --move
-python3 scripts/project_manager.py scaffold-spec <project_path>
-python3 scripts/project_manager.py scaffold-lock <project_path>
+python3 scripts/project_manager.py scaffold-spec <project_path>  # optional manual helper
+python3 scripts/project_manager.py scaffold-lock <project_path>  # optional manual helper
 python3 scripts/project_manager.py validate <project_path>
 python3 scripts/project_manager.py page-context <project_path> P07 --record-usage
 python3 scripts/project_manager.py page-context-report <project_path>
 ```
 
 `page-context` prints a read-only compact current-page projection. Its global
-lock projection repeats per page as an anti-drift guard; large Design Specs,
+lock projection repeats per page as a continuity anchor set, not a color/font allowlist; large Design Specs,
 prototype, and `templates/charts/` references are emitted only as scoped
 path/SHA fingerprints and are read once per execution context. `--bundle` is a
 deprecated compatibility no-op. `--record-usage` writes one derived snapshot

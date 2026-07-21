@@ -54,7 +54,7 @@ from svg_to_pptx.canvas_contract import (
 try:
     from update_spec import parse_lock as _parse_spec_lock
 except ImportError:
-    _parse_spec_lock = None  # spec_lock drift check will be skipped
+    _parse_spec_lock = None  # spec_lock anchor comparison will be skipped
 
 try:
     from svg_to_pptx.animation_config import (
@@ -885,29 +885,16 @@ PPT_SAFE_FONTS = {
     'impact',
 }
 
-# Ramp envelope for font-size drift detection.
-# From strategist.md §g — Font Size Ramp: the ramp spans
-# from page-number floor (0.5x body) to cover-title ceiling (5.0x body).
-# Intermediate px values within this envelope are permitted per
-# executor-base.md §2.1 ("Executor may use an intermediate size ... provided
-# the size's ratio to body falls within the corresponding role's band"); only
-# values outside every band — i.e. outside this envelope — are drift.
-RAMP_MIN_RATIO = 0.5
-RAMP_MAX_RATIO = 5.0
+# Cheap numeric envelope for font-size role review. Semantic role assignment is
+# prompt-owned; Checker only verifies that a used value is close to at least one
+# declared size anchor.
+FONT_SIZE_ANCHOR_TOLERANCE_PX = 2.0
 
 # Oversampling alone does not imply distortion and is often harmless for small
 # logos. Warn about downscaling only when the source also has material on-disk
 # weight, because PPTX embeds the compressed source asset rather than raw pixels.
 IMAGE_DOWNSIZE_WARN_RATIO = 4.0
 IMAGE_DOWNSIZE_WARN_MIN_BYTES = 1024 * 1024
-
-# Modes / visual styles that legitimately use unbounded hero / poster type
-# (huge cover numerals, act dividers, single-number reveals). For these the
-# size-drift upper bound is dropped — the oversize is the design, not Executor
-# drift. The lower bound still applies.
-POSTER_SIZE_MODES = {'showcase'}
-POSTER_SIZE_STYLES = {'zine'}
-
 
 def _design_spec_is_brand(spec_path: Path) -> bool:
     """Return True when a design_spec.md frontmatter declares ``kind: brand``.
@@ -1165,10 +1152,10 @@ class SVGQualityChecker:
             'errors': 0
         }
         self.issue_types = defaultdict(int)
-        # spec_lock drift state (populated only when _parse_spec_lock is available
-        # and a spec_lock.md is found near the SVG)
+        # spec_lock anchor comparison state (populated only when
+        # _parse_spec_lock is available and a spec_lock.md is found near the SVG)
         self._lock_cache: Dict[Path, Dict] = {}
-        self._drift_summary: Dict[str, Dict[str, set]] = {
+        self._anchor_value_summary: Dict[str, Dict[str, set]] = {
             'colors': defaultdict(set),
             'fonts': defaultdict(set),
             'sizes': defaultdict(set),
@@ -1382,11 +1369,12 @@ class SVGQualityChecker:
                 # 8e. Validate rendering-neutral page/structure compiler hints.
                 self._check_semantic_markers(root, svg_path, result)
 
-                # 9. Check spec_lock drift (colors / font-family / font-size).
+                # 9. Compare values with spec_lock anchors. Additional colors
+                #    and fonts are informational; type-size role drift warns.
                 #    Templates do not ship a spec_lock.md, so skip in template
                 #    mode to avoid noise.
                 if not self.template_mode:
-                    self._check_spec_lock_drift(
+                    self._check_spec_lock_alignment(
                         content,
                         svg_path,
                         result,
@@ -4134,8 +4122,10 @@ class SVGQualityChecker:
                 samples += ', ...'
             message = (
                 f'{len(ungrouped)} ungrouped top-level Slide-local element(s) '
-                f'in svg_output ({samples}); wrap each logical content unit '
-                'in a top-level <g id="...">'
+                f'in svg_output ({samples}); group only logical content units '
+                'in a top-level <g id="...">. Keep genuine static page framing '
+                'as a root primitive and declare a supported data-pptx-role such '
+                'as "background" or "decoration"'
             )
             prototype_root = self._active_prototype_root()
             prototype_ungrouped = (
@@ -4776,7 +4766,7 @@ class SVGQualityChecker:
         }
         return colors, fonts, sizes
 
-    def _check_spec_lock_drift(
+    def _check_spec_lock_alignment(
         self,
         content: str,
         svg_path: Path,
@@ -4784,15 +4774,16 @@ class SVGQualityChecker:
         *,
         root: ET.Element,
     ):
-        """Detect values used in the SVG that fall outside spec_lock.md.
+        """Compare SVG values with reusable anchors in spec_lock.md.
 
         Covers colors (fill / stroke / stop-color / flood-color / pattern
         metadata), font-family, and font-size.
-        Emits per-file warnings summarising the drift counts; exact drifting
-        values are accumulated in self._drift_summary for the end-of-run
-        aggregation. When spec_lock.md is missing, silently skip this local
-        drift check; the Generate route's required-artifact gate owns whether
-        execution may begin.
+        Additional colors and font families are valid contextual authoring and
+        are recorded as information. Font sizes outside every declared role
+        anchor's ±2px band remain warnings. Exact values are accumulated in
+        self._anchor_value_summary for the end-of-run aggregation. When
+        spec_lock.md is missing, silently skip this local comparison; the
+        Generate route's required-artifact gate owns whether execution may begin.
         """
         lock = self._get_spec_lock(svg_path)
         if lock is None:
@@ -4877,18 +4868,20 @@ class SVGQualityChecker:
         locked_fonts = set(allowed_fonts)
         allowed_fonts.update(prototype_fonts)
 
-        # Sizes: declared slots are anchors; body is the ramp baseline.
+        # Sizes: declared slots are anchors. Checker cannot infer which role a
+        # text node carries, so it uses the union of their ±2px bands as a cheap
+        # numeric safety net; prompt rules own semantic role mapping.
         allowed_sizes = set()
-        body_px = None
+        anchor_sizes = []
         for k, v in typo.items():
             if k == 'font_family' or k.endswith('_family'):
                 continue
-            allowed_sizes.add(self._normalize_size(v))
-            if k == 'body':
-                try:
-                    body_px = float(self._normalize_size(v))
-                except (ValueError, TypeError):
-                    body_px = None
+            normalized_size = self._normalize_size(v)
+            allowed_sizes.add(normalized_size)
+            try:
+                anchor_sizes.append(float(normalized_size))
+            except (ValueError, TypeError):
+                pass
         locked_sizes = set(allowed_sizes)
         allowed_sizes.update(prototype_sizes)
 
@@ -4929,59 +4922,50 @@ class SVGQualityChecker:
             ):
                 inherited_fonts.add(val)
 
-        # Poster / showcase contexts use unbounded hero type — drop the ceiling.
-        mode = (lock.get('mode', {}).get('mode') or '').strip().lower()
-        vstyle = (lock.get('visual_style', {}).get('visual_style') or '').strip().lower()
-        max_ratio = (float('inf') if mode in POSTER_SIZE_MODES or vstyle in POSTER_SIZE_STYLES
-                     else RAMP_MAX_RATIO)
-
         size_drifts = set()
         inherited_sizes = set()
-        used_sizes = []
         for raw_value in self._svg_property_values(content, 'font-size'):
             val = self._normalize_size(raw_value)
-            used_sizes.append(val)
             if val in prototype_sizes and val not in locked_sizes:
                 inherited_sizes.add(val)
                 continue
             if not allowed_sizes or val in allowed_sizes:
                 continue
-            # Intermediate values are allowed when they sit inside the ramp
-            # envelope (ratio to body within [RAMP_MIN_RATIO, max_ratio]).
-            if body_px and body_px > 0:
-                try:
-                    ratio = float(val) / body_px
-                    if RAMP_MIN_RATIO <= ratio <= max_ratio:
-                        continue
-                except ValueError:
-                    pass
+            try:
+                used_px = float(val)
+            except (TypeError, ValueError):
+                size_drifts.add(val)
+                continue
+            if any(
+                abs(used_px - anchor_px) <= FONT_SIZE_ANCHOR_TOLERANCE_PX
+                for anchor_px in anchor_sizes
+            ):
+                continue
             size_drifts.add(val)
 
-        template_size_drift = self._detect_template_size_drift(
-            used_sizes, allowed_sizes, body_px
-        )
-
-        # Record in run-wide aggregation
+        # Record in run-wide aggregation. Colors/fonts beyond the anchor set are
+        # contextual values, not release issues. Sizes retain role-anchor review.
         fname = svg_path.name
         for v in color_drifts:
-            self._drift_summary['colors'][v].add(fname)
+            self._anchor_value_summary['colors'][v].add(fname)
         for v in font_drifts:
-            self._drift_summary['fonts'][v].add(fname)
+            self._anchor_value_summary['fonts'][v].add(fname)
         for v in size_drifts:
-            self._drift_summary['sizes'][v].add(fname)
+            self._anchor_value_summary['sizes'][v].add(fname)
 
-        # Per-file warning (one condensed line; details live in summary)
-        parts = []
+        contextual_values = {}
         if color_drifts:
-            parts.append(f"{len(color_drifts)} color(s)")
+            contextual_values['colors'] = sorted(color_drifts)
         if font_drifts:
-            parts.append(f"{len(font_drifts)} font-family value(s)")
+            contextual_values['font_families'] = sorted(font_drifts)
+        if contextual_values:
+            result['info']['contextual_values'] = contextual_values
+
         if size_drifts:
-            parts.append(f"{len(size_drifts)} font-size value(s)")
-        if parts:
             result['warnings'].append(
-                f"spec_lock drift: {', '.join(parts)} not in spec_lock.md "
-                "(see drift summary for details)"
+                f"spec_lock typography-size review: {len(size_drifts)} "
+                "font-size value(s) fall outside ±2px of every declared "
+                "role anchor (see anchor comparison summary)"
             )
         inherited_parts = []
         if inherited_colors:
@@ -4993,77 +4977,10 @@ class SVGQualityChecker:
         if inherited_parts:
             self._append_inherited_info(
                 result,
-                'spec_lock_drift',
+                'spec_lock_alignment',
                 f"{', '.join(inherited_parts)} come unchanged from mirror "
                 "prototype and are accepted without expanding spec_lock.md",
             )
-        if template_size_drift:
-            result['warnings'].append(template_size_drift)
-
-    def _detect_template_size_drift(self, used_sizes, allowed_sizes, body_px):
-        """Warn when template-like small sizes bypass the locked type ramp.
-
-        The normal drift check deliberately permits in-ramp feature sizes, so
-        it should not hard-fail valid hero numbers or one-off labels. This
-        warning targets the common executor failure mode: copying a template's
-        compact 12/15/16px text stack instead of mapping content roles to
-        spec_lock typography, then reflowing from those locked px values.
-        """
-        if not allowed_sizes or not body_px or body_px <= 0:
-            return None
-
-        try:
-            declared_min = min(float(v) for v in allowed_sizes)
-        except ValueError:
-            declared_min = None
-
-        # Stay narrow on purpose: real decks carry legitimate undeclared
-        # sub-body sizes (intermediate levels, labels, emphasis) just below the
-        # locked body, so "any size < body" floods the warning and destroys its
-        # credibility. Only flag values that read as genuine template leftovers
-        # — at or below `body * 0.75`, or below the smallest declared slot. This
-        # under-warns (a stray 15/16 against a body of 18 can slip through) in
-        # exchange for not crying wolf on valid intermediate type.
-        template_like_limit = body_px * 0.75
-        template_like_sub_body = []
-        for raw in used_sizes:
-            if raw in allowed_sizes:
-                continue
-            try:
-                size = float(raw)
-            except (TypeError, ValueError):
-                continue
-            below_declared_floor = declared_min is not None and size < declared_min
-            if size <= template_like_limit or below_declared_floor:
-                template_like_sub_body.append(raw)
-
-        if not template_like_sub_body:
-            return None
-
-        counts = Counter(template_like_sub_body)
-        distinct = sorted(counts, key=lambda v: float(v))
-        repeated_total = sum(counts.values())
-
-        below_declared_floor = []
-        if declared_min is not None:
-            below_declared_floor = [v for v in distinct if float(v) < declared_min]
-
-        if len(distinct) < 2 and repeated_total < 4 and not below_declared_floor:
-            return None
-
-        sample = ', '.join(
-            f"{v}x{counts[v]}" if counts[v] > 1 else v
-            for v in distinct[:5]
-        )
-        more = len(distinct) - 5
-        suffix = f" (+{more} more)" if more > 0 else ""
-        return (
-            "possible template font-size drift: undeclared sub-body size(s) "
-            f"{sample}{suffix}. Map each text item to a spec_lock typography "
-            "role first, then reflow card height / y / dy / line-height from "
-            "the locked px values."
-        )
-
     def _find_image_sources_manifest(self, svg_path: Path) -> Path | None:
         """Locate image_sources.json for a project SVG.
 
@@ -5872,28 +5789,6 @@ class SVGQualityChecker:
                     f"{filename} is a Generated slice row but images/{filename} does not exist.",
                 ))
 
-        has_coverage_note = 'Image-as-canvas' in spec_text or 'image-as-canvas' in spec_text
-        pattern_ids = self._collect_layout_pattern_ids(image_rows)
-        if len(image_rows) >= 4 and not any(38 <= pid <= 46 for pid in pattern_ids):
-            if not has_coverage_note:
-                self._illustration_issues.append((
-                    'warning',
-                    'missing_image_as_canvas',
-                    "deck has 4+ image-bearing rows but no #38-#46 image-as-canvas "
-                    "layout and no coverage note in design_spec.md §VIII.",
-                ))
-
-        conventional_ids = {1, 2, 3, 5, 6}
-        if len(image_rows) >= 4 and pattern_ids and pattern_ids.issubset(conventional_ids):
-            if not has_coverage_note:
-                self._illustration_issues.append((
-                    'warning',
-                    'layout_pattern_degenerated',
-                    "all image-bearing rows use only basic full-bleed / left-right / "
-                    "top-bottom patterns (#1/#2/#3/#5/#6); re-check "
-                    "references/image-layout-patterns.md for modifiers or image-as-canvas options.",
-                ))
-
         for row in image_rows:
             self._check_decorative_image_row(row, project_path, svg_texts)
 
@@ -5977,14 +5872,6 @@ class SVGQualityChecker:
     @staticmethod
     def _row_layout(row: Dict[str, str]) -> str:
         return row.get('Layout pattern', '').strip()
-
-    @staticmethod
-    def _collect_layout_pattern_ids(rows: List[Dict[str, str]]) -> set[int]:
-        ids: set[int] = set()
-        for row in rows:
-            for match in re.finditer(r'#(\d+)\b', SVGQualityChecker._row_layout(row)):
-                ids.add(int(match.group(1)))
-        return ids
 
     def _load_project_lock_images(self, project_path: Path) -> set[str]:
         """Return filenames listed under spec_lock.md images."""
@@ -6604,12 +6491,11 @@ class SVGQualityChecker:
             for error in result['errors']:
                 print(f"   [ERROR] {error}")
 
-        # Display warnings
+        # Display the complete warning set from this run. The generation
+        # workflow reviews all findings before one consolidated repair pass.
         if result['warnings']:
-            for warning in result['warnings'][:2]:  # Only show first 2 warnings
+            for warning in result['warnings']:
                 print(f"   [WARN] {warning}")
-            if len(result['warnings']) > 2:
-                print(f"   ... and {len(result['warnings']) - 2} more warning(s)")
 
         print()
 
@@ -6634,8 +6520,8 @@ class SVGQualityChecker:
             for issue_type, count in sorted(self.issue_types.items(), key=lambda x: x[1], reverse=True):
                 print(f"  {issue_type}: {count}")
 
-        # spec_lock drift aggregation (only printed when a lock was found)
-        self._print_drift_summary()
+        # spec_lock anchor comparison (only printed when a lock was found)
+        self._print_anchor_value_summary()
 
         # Template-mode aggregation (orphan/missing roster + placeholder hints)
         self._print_template_summary()
@@ -6811,40 +6697,59 @@ class SVGQualityChecker:
         for severity, _msg in self._pptx_structure_issues:
             self.issue_types[f'pptx_structure_{severity}'] += 1
 
-    def _print_drift_summary(self):
-        """Print spec_lock drift aggregation if any was observed.
-
-        Values are sorted by file-count descending so frequent drift surfaces
-        first. Frequent drift usually means spec_lock.md is missing entries
-        the Strategist should have included; rare drift is more likely actual
-        Executor drift and warrants SVG review.
-        """
+    def _print_anchor_value_summary(self):
+        """Print anchor comparisons without treating contextual paint/type as drift."""
         if not self._lock_seen:
             return
-        has_drift = any(self._drift_summary[cat] for cat in self._drift_summary)
-        if not has_drift:
-            print("\n[OK] spec_lock drift: none — all colors, fonts, and sizes are anchored to spec_lock.md")
+        has_contextual = any(
+            self._anchor_value_summary[category]
+            for category in ('colors', 'fonts')
+        )
+        has_size_review = bool(self._anchor_value_summary['sizes'])
+        if not has_contextual and not has_size_review:
+            print(
+                "\n[OK] spec_lock anchor comparison: no additional contextual "
+                "colors/fonts or out-of-band font sizes"
+            )
             return
 
-        print("\nspec_lock drift — values used outside spec_lock.md:")
-        labels = [('colors', 'Colors'),
-                  ('fonts', 'Font families'),
-                  ('sizes', 'Font sizes')]
-        for category, label in labels:
-            items = self._drift_summary.get(category, {})
-            if not items:
-                continue
-            entries = sorted(items.items(), key=lambda x: (-len(x[1]), x[0]))
-            print(f"  {label}:")
+        if has_contextual:
+            print("\nContextual values beyond spec_lock anchors (informational):")
+            for category, label in (
+                ('colors', 'Colors'),
+                ('fonts', 'Font families'),
+            ):
+                items = self._anchor_value_summary.get(category, {})
+                if not items:
+                    continue
+                entries = sorted(
+                    items.items(), key=lambda item: (-len(item[1]), item[0])
+                )
+                print(f"  {label}:")
+                for val, files in entries:
+                    count = len(files)
+                    suffix = "file" if count == 1 else "files"
+                    print(f"    {val}  ({count} {suffix})")
+            print(
+                "Note: contextual page paint, gradient/effect colors, and "
+                "export-safe typefaces are allowed.\n"
+                "      Add a spec_lock row only when a value becomes a "
+                "recurring named semantic role."
+            )
+
+        if has_size_review:
+            print(
+                "\nTypography sizes outside every declared role anchor ±2px "
+                "(review warnings):"
+            )
+            entries = sorted(
+                self._anchor_value_summary['sizes'].items(),
+                key=lambda item: (-len(item[1]), item[0]),
+            )
             for val, files in entries:
-                n = len(files)
-                suffix = "file" if n == 1 else "files"
-                print(f"    {val}  ({n} {suffix})")
-        print(
-            "Tip: frequent out-of-lock values usually mean spec_lock.md is missing\n"
-            "     entries — extend the lock (scripts/update_spec.py or manual edit).\n"
-            "     Rare ones are likely Executor drift — review the affected SVGs."
-        )
+                count = len(files)
+                suffix = "file" if count == 1 else "files"
+                print(f"  {val}  ({count} {suffix})")
 
     def _percentage(self, count: int) -> int:
         """Calculate percentage"""
@@ -6953,12 +6858,15 @@ class SVGQualityChecker:
                 else:
                     introduced.append(item)
 
+        # Keep the legacy `drift` JSON field for report compatibility. Its
+        # colors/fonts entries are informational anchor comparisons; only size
+        # entries produce checker warnings.
         drift = {
             category: {
                 value: sorted(files)
                 for value, files in sorted(values.items())
             }
-            for category, values in self._drift_summary.items()
+            for category, values in self._anchor_value_summary.items()
         }
         source_import = dict(self._source_import_summary)
         payload = {

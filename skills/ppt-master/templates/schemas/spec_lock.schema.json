@@ -25,13 +25,24 @@
       "type": "object",
       "properties": {
         "image_rendering": {"type": "string"},
-        "image_rendering_behavior": {"type": "string"}
+        "image_rendering_behavior": {"type": "string"},
+        "image_rendering_references": {"type": "string"}
       }
     },
     "typography": {
       "type": "object",
       "properties": {
         "font_family": {"type": "string", "minLength": 1},
+        "title_family": {"type": "string", "minLength": 1},
+        "body_family": {"type": "string", "minLength": 1},
+        "subtitle_family": {"type": "string", "minLength": 1},
+        "annotation_family": {"type": "string", "minLength": 1},
+        "footer_family": {"type": "string", "minLength": 1},
+        "footnote_family": {"type": "string", "minLength": 1},
+        "data_family": {"type": "string", "minLength": 1},
+        "emphasis_family": {"type": "string", "minLength": 1},
+        "quote_family": {"type": "string", "minLength": 1},
+        "code_family": {"type": "string", "minLength": 1},
         "body": {"type": "number"},
         "title": {"type": "number"}
       }
@@ -97,7 +108,10 @@
         "pattern": "^mode$",
         "required": true,
         "required_fields": ["mode"],
-        "allowed_fields": ["mode", "mode_behavior"],
+        "allowed_fields": ["mode", "mode_behavior", "mode_references"],
+        "field_patterns": {
+          "mode_references": "^[a-z0-9][a-z0-9-]*(?:\\s*,\\s*[a-z0-9][a-z0-9-]*)*$"
+        },
         "field_enums": {
           "mode": ["pyramid", "narrative", "instructional", "showcase", "briefing", "custom"]
         }
@@ -107,15 +121,37 @@
         "pattern": "^visual_style$",
         "required": true,
         "required_fields": ["visual_style"],
-        "allowed_fields": ["visual_style", "visual_style_behavior"]
+        "allowed_fields": ["visual_style", "visual_style_behavior", "visual_style_references"],
+        "field_patterns": {
+          "visual_style_references": "^[a-z0-9][a-z0-9-]*(?:\\s*,\\s*[a-z0-9][a-z0-9-]*)*$"
+        }
       },
-      {"id": "colors", "pattern": "^colors$", "required": true, "min_entries": 1},
+      {
+        "id": "colors",
+        "pattern": "^colors$",
+        "required": true,
+        "min_entries": 1,
+        "field_patterns": {
+          "image_rendering_references": "^[a-z0-9][a-z0-9-]*(?:\\s*,\\s*[a-z0-9][a-z0-9-]*)*$"
+        }
+      },
       {
         "id": "typography",
         "pattern": "^typography$",
         "required": true,
         "required_fields": ["font_family", "body", "title"],
         "field_patterns": {
+          "font_family": "^\\S(?:.*\\S)?$",
+          "title_family": "^\\S(?:.*\\S)?$",
+          "body_family": "^\\S(?:.*\\S)?$",
+          "subtitle_family": "^\\S(?:.*\\S)?$",
+          "annotation_family": "^\\S(?:.*\\S)?$",
+          "footer_family": "^\\S(?:.*\\S)?$",
+          "footnote_family": "^\\S(?:.*\\S)?$",
+          "data_family": "^\\S(?:.*\\S)?$",
+          "emphasis_family": "^\\S(?:.*\\S)?$",
+          "quote_family": "^\\S(?:.*\\S)?$",
+          "code_family": "^\\S(?:.*\\S)?$",
           "body": "^[0-9]+(?:\\.[0-9]+)?$",
           "title": "^[0-9]+(?:\\.[0-9]+)?$"
         }
